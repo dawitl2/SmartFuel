@@ -305,7 +305,12 @@ fun SmartFuelApp() {
     Surface(color = Color(0xFF0A0A0A), modifier = Modifier.fillMaxSize()) {
         when {
             loading && dashboard == null -> LoadingView()
-            error != null && dashboard == null -> ErrorView(error.orEmpty(), ::load)
+            error != null && dashboard == null -> ErrorView(
+                message = error.orEmpty(),
+                source = dataSource,
+                onRetry = { load(dataSource) },
+                onReturnToMock = { changeSource("mock") }
+            )
             dashboard != null -> DashboardView(
                 dashboard = dashboard!!,
                 online = online,
@@ -538,15 +543,26 @@ fun LoadingView() {
 }
 
 @Composable
-fun ErrorView(message: String, onRetry: () -> Unit) {
+fun ErrorView(message: String, source: String, onRetry: () -> Unit, onReturnToMock: () -> Unit) {
     Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         Card {
             Text("Backend unavailable", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text(message, color = Color(0xFFA1A1AA))
+            if (source == "firestore") {
+                Spacer(Modifier.height(8.dp))
+                Text("Firestore mode is selected. Return to mock mode to use demo data while Firebase is being configured.", color = Color(0xFFFDE68A), fontSize = 13.sp)
+            }
             Spacer(Modifier.height(16.dp))
-            Button(onClick = onRetry, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
-                Text("Retry")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onRetry, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                    Text("Retry")
+                }
+                if (source == "firestore") {
+                    Button(onClick = onReturnToMock, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
+                        Text("Mock")
+                    }
+                }
             }
         }
     }
