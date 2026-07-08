@@ -1,0 +1,13 @@
+node_modules/
+dist/
+logs/
+android/.gradle/
+android/**/build/
+android/local.properties
+raspberry-pi/cache/
+raspberry-pi/logs/
+__pycache__/
+.env
+.env.local
+.DS_Store
+npm-debug.log*

@@ -1,0 +1,19 @@
+[Unit]
+Description=SmartFuel Raspberry Pi Telemetry Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smartfuel/raspberry-pi
+Environment=SMARTFUEL_API_URL=https://your-backend.example.com
+Environment=SMARTFUEL_DEVICE_TOKEN=replace-with-device-token
+Environment=SMARTFUEL_SAMPLE_SECONDS=5
+Environment=SMARTFUEL_PROVIDER=mock
+ExecStart=/usr/bin/python3 -m smartfuel_pi.telemetry_service
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target

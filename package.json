@@ -1,0 +1,17 @@
+{
+  "name": "smartfuel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SmartFuel OBD-II vehicle telemetry and fuel estimation demo.",
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:backend dev:frontend",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install",
+    "build": "npm --prefix frontend run build",
+    "start": "npm --prefix backend start"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5"
+  }
+}

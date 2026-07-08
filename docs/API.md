@@ -1,0 +1,92 @@
+# SmartFuel API
+
+Base URL for local development: `http://localhost:4000`
+
+## Health
+
+### `GET /health`
+
+Returns backend service status.
+
+## Dashboard
+
+### `GET /api/dashboard`
+
+Returns the combined dashboard payload:
+
+- car profile
+- fuel state
+- live vehicle status
+- recent trips
+- chart series
+- statistics
+- maintenance records
+- notifications
+
+## Fuel
+
+### `GET /api/fuel`
+
+Returns fuel estimate, fuel constants, and refuel event history.
+
+### `POST /api/refuel`
+
+Records a full tank reset or partial refuel.
+
+```json
+{
+  "eventType": "partial_refuel",
+  "litersAdded": 5,
+  "note": "Added fuel from dashboard"
+}
+```
+
+`eventType` must be `full_reset` or `partial_refuel`.
+
+## Telemetry
+
+### `POST /api/telemetry`
+
+Accepts telemetry from the future Raspberry Pi service.
+
+Required header:
+
+```http
+X-Device-Token: smartfuel-demo-device-token
+```
+
+Example body:
+
+```json
+{
+  "speedKph": 54,
+  "rpm": 2200,
+  "sampleSeconds": 30,
+  "engineLoadPercent": 48,
+  "coolantTempC": 89
+}
+```
+
+## Trips
+
+### `GET /api/trips`
+
+Returns recent and active trip summaries.
+
+## Statistics
+
+### `GET /api/statistics`
+
+Returns daily, weekly, monthly distance and driving habit demo data.
+
+## Maintenance
+
+### `GET /api/maintenance`
+
+Returns maintenance records for the demo vehicle.
+
+## Notifications
+
+### `GET /api/notifications`
+
+Returns low fuel, idle, and maintenance notification demo records.
