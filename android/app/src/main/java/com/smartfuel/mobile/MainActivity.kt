@@ -126,7 +126,16 @@ class SmartFuelApi(private val context: Context) {
             parseDashboard(raw) to true
         } catch (exception: Exception) {
             val cached = prefs.getString("dashboard", null)
-            if (cached != null) parseDashboard(cached) to false else throw exception
+            if (cached != null) {
+                val cachedDashboard = parseDashboard(cached)
+                if (cachedDashboard.source == source) {
+                    cachedDashboard to false
+                } else {
+                    throw exception
+                }
+            } else {
+                throw exception
+            }
         }
     }
 
@@ -252,16 +261,17 @@ fun SmartFuelApp() {
     var dataSource by remember { mutableStateOf(prefs.getString("source", "mock") ?: "mock") }
     var activeTab by remember { mutableStateOf("Overview") }
     var controlsOpen by remember { mutableStateOf(false) }
+    var settingsOpen by remember { mutableStateOf(false) }
 
-    fun load() {
+    fun load(source: String = dataSource) {
         scope.launch {
             loading = true
             error = null
             try {
-                val result = api.getDashboard(dataSource)
+                val result = api.getDashboard(source)
                 dashboard = result.first
                 online = result.second
-                if (result.first.fuel.percentage <= result.first.settings.lowFuelNotificationPercent) {
+                if (source != "mock" && result.first.source != "mock" && result.first.fuel.percentage <= result.first.settings.lowFuelNotificationPercent) {
                     showLowFuelNotification(context, result.first.fuel.percentage)
                 }
             } catch (exception: Exception) {
@@ -276,7 +286,7 @@ fun SmartFuelApp() {
         scope.launch {
             try {
                 api.refuel(eventType, liters.toDoubleOrNull() ?: 0.0, dataSource)
-                load()
+                load(dataSource)
             } catch (exception: Exception) {
                 error = exception.message
             }
@@ -286,7 +296,8 @@ fun SmartFuelApp() {
     fun changeSource(source: String) {
         dataSource = source
         prefs.edit().putString("source", source).apply()
-        load()
+        dashboard = null
+        load(source)
     }
 
     LaunchedEffect(Unit) { load() }
@@ -301,12 +312,14 @@ fun SmartFuelApp() {
                 dataSource = dataSource,
                 activeTab = activeTab,
                 controlsOpen = controlsOpen,
+                settingsOpen = settingsOpen,
                 liters = liters,
                 onSourceChange = ::changeSource,
                 onTabChange = { activeTab = it },
                 onToggleControls = { controlsOpen = !controlsOpen },
+                onToggleSettings = { settingsOpen = !settingsOpen },
                 onLitersChange = { liters = it },
-                onRefresh = ::load,
+                onRefresh = { load(dataSource) },
                 onFullReset = { refuel("full_reset") },
                 onPartialRefuel = { refuel("partial_refuel") },
                 error = error
@@ -322,10 +335,12 @@ fun DashboardView(
     dataSource: String,
     activeTab: String,
     controlsOpen: Boolean,
+    settingsOpen: Boolean,
     liters: String,
     onSourceChange: (String) -> Unit,
     onTabChange: (String) -> Unit,
     onToggleControls: () -> Unit,
+    onToggleSettings: () -> Unit,
     onLitersChange: (String) -> Unit,
     onRefresh: () -> Unit,
     onFullReset: () -> Unit,
@@ -346,11 +361,41 @@ fun DashboardView(
                     Text(dashboard.car.name, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
                     Text("${dashboard.car.year} ${dashboard.car.make} ${dashboard.car.model}", color = Color(0xFFA1A1AA))
                 }
-                StatusBadge(if (online) "${dashboard.liveStatus.engineState} / $dataSource" else "cached")
+                Column(horizontalAlignment = Alignment.End) {
+                    Button(onClick = onToggleSettings, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF18181B))) {
+                        Text("Settings", fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    StatusBadge(if (online) dashboard.liveStatus.engineState else "cached")
+                }
             }
         }
 
         if (error != null) item { Notice(error) }
+
+        if (settingsOpen) {
+            item {
+                Card {
+                    Text("Database Source", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Use Firestore", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("When enabled, mock data is not used.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                        }
+                        Switch(
+                            checked = dataSource == "firestore",
+                            onCheckedChange = { onSourceChange(if (it) "firestore" else "mock") }
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Source: $dataSource", color = Color(0xFF34D399), fontWeight = FontWeight.Bold)
+                    Text("Tank: ${dashboard.settings.tankCapacityLiters.format0()} L", color = Color(0xFFA1A1AA))
+                    Text("Range: ${dashboard.settings.maxRangeKm.format0()} km", color = Color(0xFFA1A1AA))
+                    Text("Low fuel push: Firestore mode below ${dashboard.settings.lowFuelNotificationPercent.format0()}%", color = Color(0xFFA1A1AA))
+                }
+            }
+        }
 
         item { TabBar(activeTab, onTabChange) }
 
@@ -451,28 +496,7 @@ fun DashboardView(
             }
         }
 
-        if (activeTab == "Settings") {
-            item {
-                Card {
-                    Text("Database Source", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Use Firestore", color = Color.White, fontWeight = FontWeight.Bold)
-                            Text("Mock remains available for demos.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
-                        }
-                        Switch(
-                            checked = dataSource == "firestore",
-                            onCheckedChange = { onSourceChange(if (it) "firestore" else "mock") }
-                        )
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    Text("Tank: ${dashboard.settings.tankCapacityLiters.format0()} L", color = Color(0xFFA1A1AA))
-                    Text("Range: ${dashboard.settings.maxRangeKm.format0()} km", color = Color(0xFFA1A1AA))
-                    Text("Low fuel push: below ${dashboard.settings.lowFuelNotificationPercent.format0()}%", color = Color(0xFFA1A1AA))
-                }
-            }
-
+        if (activeTab == "Overview") {
             item { SectionTitle("Notifications") }
             items(dashboard.notifications, key = { it.id }) { notification ->
                 Card {
@@ -486,8 +510,8 @@ fun DashboardView(
 
 @Composable
 fun TabBar(activeTab: String, onTabChange: (String) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        listOf("Overview", "Stats", "Trips", "Settings").forEach { tab ->
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+        listOf("Overview", "Stats", "Trips").forEach { tab ->
             Button(
                 onClick = { onTabChange(tab) },
                 modifier = Modifier.weight(1f),
@@ -496,7 +520,7 @@ fun TabBar(activeTab: String, onTabChange: (String) -> Unit) {
                     contentColor = if (activeTab == tab) Color.Black else Color.White
                 )
             ) {
-                Text(tab, fontSize = 12.sp)
+                Text(tab, fontSize = 11.sp)
             }
         }
     }

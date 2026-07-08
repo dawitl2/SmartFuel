@@ -1,7 +1,12 @@
 import { config } from '../config.js'
-import { addTelemetry as addMockTelemetry, getDashboard as getMockDashboard } from './demoStore.js'
 
 const databaseId = '(default)'
+const defaultSettings = {
+  tankCapacityLiters: 40,
+  maxRangeKm: 400,
+  consumptionLitersPerKm: 0.1,
+  lowFuelNotificationPercent: 70,
+}
 
 function isConfigured() {
   return Boolean(config.firebaseProjectId && config.firebaseWebApiKey && config.firestoreVehicleId)
@@ -85,8 +90,13 @@ async function firestoreFetch(url, options = {}) {
 }
 
 async function readDocument(path) {
-  const document = await firestoreFetch(documentUrl(path))
-  return fromFirestoreFields(document.fields || {})
+  try {
+    const document = await firestoreFetch(documentUrl(path))
+    return fromFirestoreFields(document.fields || {})
+  } catch (error) {
+    if (error.statusCode === 404) return {}
+    throw error
+  }
 }
 
 async function listCollection(path, params = '') {
@@ -131,7 +141,6 @@ export async function getDashboard() {
   const notifications = await listCollection(`${vehiclePath()}/notifications`, 'pageSize=20&orderBy=createdAt%20desc')
   const maintenance = await listCollection(`${vehiclePath()}/maintenance_records`, 'pageSize=20')
 
-  const fallback = getMockDashboard()
   const charts = telemetry
     .slice()
     .reverse()
@@ -146,17 +155,55 @@ export async function getDashboard() {
     }))
 
   return {
-    ...fallback,
     source: 'firestore',
-    car: { ...fallback.car, ...car },
-    fuel: { ...fallback.fuel, ...fuel },
-    liveStatus: { ...fallback.liveStatus, ...liveStatus },
-    trips: trips.length ? trips : fallback.trips,
-    charts: charts.length ? charts : fallback.charts,
-    maintenance: maintenance.length ? maintenance : fallback.maintenance,
-    notifications: notifications.length ? notifications : fallback.notifications,
+    car: {
+      id: config.firestoreVehicleId,
+      name: car.name || 'Firestore Vehicle',
+      make: car.make || '',
+      model: car.model || '',
+      year: car.year || new Date().getFullYear(),
+      status: car.status || 'unknown',
+      lastSeenAt: car.lastSeenAt || null,
+      ...car,
+    },
+    fuel: {
+      tankCapacityLiters: car.tankCapacityLiters || defaultSettings.tankCapacityLiters,
+      consumptionLitersPerKm: car.consumptionLitersPerKm || defaultSettings.consumptionLitersPerKm,
+      fuelUsedLiters: 0,
+      fuelRemainingLiters: 0,
+      estimatedRangeKm: 0,
+      fuelPercentage: 0,
+      lastFullResetAt: null,
+      updatedAt: null,
+      ...fuel,
+    },
+    liveStatus: {
+      speedKph: 0,
+      rpm: 0,
+      engineState: 'unknown',
+      drivingIntensity: 1,
+      coolantTempC: 0,
+      engineLoadPercent: 0,
+      estimatedOdometerKm: 0,
+      tripDistanceKm: 0,
+      drivingSeconds: 0,
+      idleSeconds: 0,
+      averageSpeedKph: 0,
+      maxSpeedKph: 0,
+      averageRpm: 0,
+      timestamp: null,
+      ...liveStatus,
+    },
+    trips,
+    charts,
+    maintenance,
+    notifications,
+    statistics: buildStatisticsFromFirestore(trips),
     settings: {
-      ...fallback.settings,
+      ...defaultSettings,
+      tankCapacityLiters: car.tankCapacityLiters || defaultSettings.tankCapacityLiters,
+      maxRangeKm: car.maxRangeKm || defaultSettings.maxRangeKm,
+      consumptionLitersPerKm: car.consumptionLitersPerKm || defaultSettings.consumptionLitersPerKm,
       firestoreReady: true,
       firestoreVehicleId: config.firestoreVehicleId,
     },
@@ -179,7 +226,8 @@ export async function getTrips() {
 }
 
 export async function getStatistics() {
-  return getMockDashboard().statistics
+  const trips = await getTrips()
+  return buildStatisticsFromFirestore(trips)
 }
 
 export async function getMaintenance() {
@@ -219,7 +267,6 @@ export async function addTelemetry(payload) {
     })
   }
 
-  addMockTelemetry(payload)
   return telemetry
 }
 
@@ -258,5 +305,19 @@ export function getFirestoreStatus() {
     projectId: config.firebaseProjectId || null,
     vehicleId: config.firestoreVehicleId,
     requiredEnv: ['FIREBASE_PROJECT_ID', 'FIREBASE_WEB_API_KEY', 'SMARTFUEL_FIRESTORE_VEHICLE_ID'],
+  }
+}
+
+function buildStatisticsFromFirestore(trips = []) {
+  const totalDistance = trips.reduce((sum, trip) => sum + (trip.distanceKm || 0), 0)
+  const totalFuel = trips.reduce((sum, trip) => sum + (trip.fuelUsedLiters || 0), 0)
+
+  return {
+    dailyDistance: [],
+    weeklyDistance: [],
+    monthlyDistance: [],
+    habits: [],
+    totalDistanceKm: Number(totalDistance.toFixed(2)),
+    averageFuelUsageLitersPer100Km: totalDistance > 0 ? Number(((totalFuel / totalDistance) * 100).toFixed(2)) : 0,
   }
 }

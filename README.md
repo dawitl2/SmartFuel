@@ -31,7 +31,7 @@ Vehicle OBD-II Port
   -> React Web Dashboard + Native Android App
 ```
 
-For the current development build, mock telemetry remains available by default. Firestore mode can be enabled from the mobile settings switch and by backend environment variables. The interfaces are shaped so the mock layer can be replaced with real OBD-II and Firestore persistence without redesigning the clients.
+For the current development build, mock telemetry remains available by default. Firestore mode can be enabled from the mobile settings switch and by backend environment variables. When Firestore mode is selected, the app requests database data only; it does not silently fall back to demo trips, charts, or notifications.
 
 ## Fuel Model
 

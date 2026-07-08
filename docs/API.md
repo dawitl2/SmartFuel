@@ -9,7 +9,7 @@ Most read/write endpoints support an optional source query:
 ?source=firestore
 ```
 
-Mock remains the default. Firestore requires Firebase environment variables.
+Mock remains the default. Firestore requires Firebase environment variables. Firestore mode is intentionally strict: it does not backfill demo trips, charts, or notifications when the database is empty.
 
 ## Health
 
