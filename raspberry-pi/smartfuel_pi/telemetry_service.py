@@ -5,6 +5,7 @@ import time
 from .cache import TelemetryCache
 from .client import SmartFuelClient
 from .config import load_config
+from .firestore_client import FirestoreTelemetryClient
 from .providers import create_provider
 
 
@@ -54,11 +55,19 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    client = SmartFuelClient(config.api_url, config.device_token)
+    if config.upload_target == "firestore":
+        client = FirestoreTelemetryClient(config.firebase_project_id, config.firebase_web_api_key, config.firestore_vehicle_id)
+    else:
+        client = SmartFuelClient(config.api_url, config.device_token)
     cache = TelemetryCache(config.cache_file)
     provider = create_provider(config.provider, config.sample_seconds)
 
-    logging.info("SmartFuel telemetry service started with provider=%s api=%s", config.provider, config.api_url)
+    logging.info(
+        "SmartFuel telemetry service started with provider=%s target=%s api=%s",
+        config.provider,
+        config.upload_target,
+        config.api_url,
+    )
 
     while running:
         payload = provider.read()

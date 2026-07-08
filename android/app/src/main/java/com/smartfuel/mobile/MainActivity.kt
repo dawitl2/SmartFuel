@@ -1,6 +1,13 @@
 package com.smartfuel.mobile
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -27,6 +34,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -46,6 +54,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,16 +67,29 @@ import java.net.URL
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        createNotificationChannel()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 70)
+        }
         setContent {
             SmartFuelTheme {
                 SmartFuelApp()
             }
         }
     }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel("smartfuel-alerts", "SmartFuel Alerts", NotificationManager.IMPORTANCE_DEFAULT)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+    }
 }
 
 data class Dashboard(
+    val source: String,
     val car: Car,
+    val settings: VehicleSettings,
     val fuel: Fuel,
     val liveStatus: LiveStatus,
     val trips: List<Trip>,
@@ -75,6 +98,7 @@ data class Dashboard(
 )
 
 data class Car(val name: String, val make: String, val model: String, val year: Int, val status: String)
+data class VehicleSettings(val tankCapacityLiters: Double, val maxRangeKm: Double, val lowFuelNotificationPercent: Double)
 data class Fuel(val remainingLiters: Double, val usedLiters: Double, val rangeKm: Double, val percentage: Double)
 data class LiveStatus(
     val speedKph: Double,
@@ -83,7 +107,9 @@ data class LiveStatus(
     val engineLoadPercent: Double,
     val odometerKm: Double,
     val tripDistanceKm: Double,
-    val drivingSeconds: Int
+    val drivingSeconds: Int,
+    val engineState: String,
+    val drivingIntensity: Double
 )
 data class Trip(val id: String, val startedAt: String, val distanceKm: Double, val averageSpeedKph: Double, val fuelUsedLiters: Double)
 data class NotificationItem(val id: String, val title: String, val body: String, val severity: String)
@@ -93,27 +119,23 @@ class SmartFuelApi(private val context: Context) {
     private val baseUrl = BuildConfig.API_BASE_URL
     private val prefs = context.getSharedPreferences("smartfuel-cache", Context.MODE_PRIVATE)
 
-    suspend fun getDashboard(): Pair<Dashboard, Boolean> = withContext(Dispatchers.IO) {
+    suspend fun getDashboard(source: String): Pair<Dashboard, Boolean> = withContext(Dispatchers.IO) {
         try {
-            val raw = get("$baseUrl/api/dashboard")
+            val raw = get("$baseUrl/api/dashboard?source=$source")
             prefs.edit().putString("dashboard", raw).apply()
             parseDashboard(raw) to true
         } catch (exception: Exception) {
             val cached = prefs.getString("dashboard", null)
-            if (cached != null) {
-                parseDashboard(cached) to false
-            } else {
-                throw exception
-            }
+            if (cached != null) parseDashboard(cached) to false else throw exception
         }
     }
 
-    suspend fun refuel(eventType: String, litersAdded: Double) = withContext(Dispatchers.IO) {
+    suspend fun refuel(eventType: String, litersAdded: Double, source: String) = withContext(Dispatchers.IO) {
         val payload = JSONObject()
             .put("eventType", eventType)
             .put("litersAdded", litersAdded)
             .put("note", "Android app refuel event")
-        post("$baseUrl/api/refuel", payload.toString())
+        post("$baseUrl/api/refuel?source=$source", payload.toString())
     }
 
     private fun get(url: String): String {
@@ -149,14 +171,21 @@ fun parseDashboard(raw: String): Dashboard {
     val car = root.getJSONObject("car")
     val fuel = root.getJSONObject("fuel")
     val live = root.getJSONObject("liveStatus")
+    val settings = root.optJSONObject("settings")
 
     return Dashboard(
+        source = root.optString("source", "mock"),
         car = Car(
             name = car.getString("name"),
             make = car.getString("make"),
             model = car.getString("model"),
             year = car.getInt("year"),
             status = car.getString("status")
+        ),
+        settings = VehicleSettings(
+            tankCapacityLiters = settings?.optDouble("tankCapacityLiters", 40.0) ?: 40.0,
+            maxRangeKm = settings?.optDouble("maxRangeKm", 400.0) ?: 400.0,
+            lowFuelNotificationPercent = settings?.optDouble("lowFuelNotificationPercent", 70.0) ?: 70.0
         ),
         fuel = Fuel(
             remainingLiters = fuel.getDouble("fuelRemainingLiters"),
@@ -171,7 +200,9 @@ fun parseDashboard(raw: String): Dashboard {
             engineLoadPercent = live.getDouble("engineLoadPercent"),
             odometerKm = live.getDouble("estimatedOdometerKm"),
             tripDistanceKm = live.getDouble("tripDistanceKm"),
-            drivingSeconds = live.getInt("drivingSeconds")
+            drivingSeconds = live.getInt("drivingSeconds"),
+            engineState = live.optString("engineState", "unknown"),
+            drivingIntensity = live.optDouble("drivingIntensity", 1.0)
         ),
         trips = root.getJSONArray("trips").mapObjects {
             Trip(
@@ -203,15 +234,14 @@ fun parseDashboard(raw: String): Dashboard {
 
 private fun <T> JSONArray.mapObjects(transform: (JSONObject) -> T): List<T> {
     val items = mutableListOf<T>()
-    for (index in 0 until length()) {
-        items.add(transform(getJSONObject(index)))
-    }
+    for (index in 0 until length()) items.add(transform(getJSONObject(index)))
     return items
 }
 
 @Composable
 fun SmartFuelApp() {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("smartfuel-cache", Context.MODE_PRIVATE) }
     val api = remember { SmartFuelApi(context) }
     val scope = rememberCoroutineScope()
     var dashboard by remember { mutableStateOf<Dashboard?>(null) }
@@ -219,15 +249,21 @@ fun SmartFuelApp() {
     var online by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var liters by remember { mutableStateOf("5") }
+    var dataSource by remember { mutableStateOf(prefs.getString("source", "mock") ?: "mock") }
+    var activeTab by remember { mutableStateOf("Overview") }
+    var controlsOpen by remember { mutableStateOf(false) }
 
     fun load() {
         scope.launch {
             loading = true
             error = null
             try {
-                val result = api.getDashboard()
+                val result = api.getDashboard(dataSource)
                 dashboard = result.first
                 online = result.second
+                if (result.first.fuel.percentage <= result.first.settings.lowFuelNotificationPercent) {
+                    showLowFuelNotification(context, result.first.fuel.percentage)
+                }
             } catch (exception: Exception) {
                 error = exception.message
             } finally {
@@ -239,12 +275,18 @@ fun SmartFuelApp() {
     fun refuel(eventType: String) {
         scope.launch {
             try {
-                api.refuel(eventType, liters.toDoubleOrNull() ?: 0.0)
+                api.refuel(eventType, liters.toDoubleOrNull() ?: 0.0, dataSource)
                 load()
             } catch (exception: Exception) {
                 error = exception.message
             }
         }
+    }
+
+    fun changeSource(source: String) {
+        dataSource = source
+        prefs.edit().putString("source", source).apply()
+        load()
     }
 
     LaunchedEffect(Unit) { load() }
@@ -256,7 +298,13 @@ fun SmartFuelApp() {
             dashboard != null -> DashboardView(
                 dashboard = dashboard!!,
                 online = online,
+                dataSource = dataSource,
+                activeTab = activeTab,
+                controlsOpen = controlsOpen,
                 liters = liters,
+                onSourceChange = ::changeSource,
+                onTabChange = { activeTab = it },
+                onToggleControls = { controlsOpen = !controlsOpen },
                 onLitersChange = { liters = it },
                 onRefresh = ::load,
                 onFullReset = { refuel("full_reset") },
@@ -271,7 +319,13 @@ fun SmartFuelApp() {
 fun DashboardView(
     dashboard: Dashboard,
     online: Boolean,
+    dataSource: String,
+    activeTab: String,
+    controlsOpen: Boolean,
     liters: String,
+    onSourceChange: (String) -> Unit,
+    onTabChange: (String) -> Unit,
+    onToggleControls: () -> Unit,
     onLitersChange: (String) -> Unit,
     onRefresh: () -> Unit,
     onFullReset: () -> Unit,
@@ -292,13 +346,13 @@ fun DashboardView(
                     Text(dashboard.car.name, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
                     Text("${dashboard.car.year} ${dashboard.car.make} ${dashboard.car.model}", color = Color(0xFFA1A1AA))
                 }
-                StatusBadge(if (online) dashboard.car.status else "cached")
+                StatusBadge(if (online) "${dashboard.liveStatus.engineState} / $dataSource" else "cached")
             }
         }
 
-        if (error != null) {
-            item { Notice(error) }
-        }
+        if (error != null) item { Notice(error) }
+
+        item { TabBar(activeTab, onTabChange) }
 
         item {
             Card {
@@ -323,69 +377,126 @@ fun DashboardView(
 
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                Metric("Coolant", "${dashboard.liveStatus.coolantTempC.format0()} C", Modifier.weight(1f))
-                Metric("Engine Load", "${dashboard.liveStatus.engineLoadPercent.format0()}%", Modifier.weight(1f))
+                Metric("Engine", dashboard.liveStatus.engineState, Modifier.weight(1f))
+                Metric("Intensity", "${dashboard.liveStatus.drivingIntensity.format1()}x", Modifier.weight(1f))
             }
         }
 
-        item {
-            Card {
-                Text("Fuel Controls", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = liters,
-                        onValueChange = onLitersChange,
-                        label = { Text("Liters") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Button(onClick = onPartialRefuel, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
-                        Text("Add")
+        if (activeTab == "Overview") {
+            item {
+                Card {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Fuel Controls", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            Text("Keep advanced controls tucked away.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                        }
+                        Button(onClick = onToggleControls, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                            Text(if (controlsOpen) "Hide" else "Extend")
+                        }
+                    }
+                    if (controlsOpen) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = liters,
+                                onValueChange = onLitersChange,
+                                label = { Text("Liters") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(onClick = onPartialRefuel, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
+                                Text("Add")
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(onClick = onFullReset, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
+                                Text("Full Reset")
+                            }
+                            Button(onClick = onRefresh, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                                Text("Refresh")
+                            }
+                        }
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = onFullReset, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
-                        Text("Full Tank Reset")
-                    }
-                    Button(onClick = onRefresh, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
-                        Text("Refresh")
+            }
+        }
+
+        if (activeTab == "Stats") {
+            item {
+                Card {
+                    Text("Speed Trend", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    MiniBarChart(points = dashboard.charts.map { it.speed }, color = Color(0xFF2563EB))
+                    Spacer(Modifier.height(14.dp))
+                    Text("RPM Trend", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    MiniBarChart(points = dashboard.charts.map { it.rpm }, color = Color(0xFFE11D48))
+                }
+            }
+        }
+
+        if (activeTab == "Trips") {
+            item { SectionTitle("Recent Trips") }
+            items(dashboard.trips, key = { it.id }) { trip ->
+                Card {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(trip.startedAt.take(10), color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("${trip.distanceKm.format1()} km / ${trip.averageSpeedKph.format0()} km/h avg", color = Color(0xFFA1A1AA))
+                        }
+                        Text("${trip.fuelUsedLiters.format1()} L", color = Color(0xFF34D399), fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
 
-        item {
-            Card {
-                Text("Speed Trend", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(10.dp))
-                MiniBarChart(points = dashboard.charts.map { it.speed }, color = Color(0xFF2563EB))
-            }
-        }
-
-        item {
-            SectionTitle("Recent Trips")
-        }
-        items(dashboard.trips, key = { it.id }) { trip ->
-            Card {
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(trip.startedAt.take(10), color = Color.White, fontWeight = FontWeight.Bold)
-                        Text("${trip.distanceKm.format1()} km • ${trip.averageSpeedKph.format0()} km/h avg", color = Color(0xFFA1A1AA))
+        if (activeTab == "Settings") {
+            item {
+                Card {
+                    Text("Database Source", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Use Firestore", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("Mock remains available for demos.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                        }
+                        Switch(
+                            checked = dataSource == "firestore",
+                            onCheckedChange = { onSourceChange(if (it) "firestore" else "mock") }
+                        )
                     }
-                    Text("${trip.fuelUsedLiters.format1()} L", color = Color(0xFF34D399), fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(12.dp))
+                    Text("Tank: ${dashboard.settings.tankCapacityLiters.format0()} L", color = Color(0xFFA1A1AA))
+                    Text("Range: ${dashboard.settings.maxRangeKm.format0()} km", color = Color(0xFFA1A1AA))
+                    Text("Low fuel push: below ${dashboard.settings.lowFuelNotificationPercent.format0()}%", color = Color(0xFFA1A1AA))
+                }
+            }
+
+            item { SectionTitle("Notifications") }
+            items(dashboard.notifications, key = { it.id }) { notification ->
+                Card {
+                    Text(notification.title, color = Color.White, fontWeight = FontWeight.Bold)
+                    Text(notification.body, color = Color(0xFFA1A1AA), fontSize = 13.sp)
                 }
             }
         }
+    }
+}
 
-        item {
-            SectionTitle("Notifications")
-        }
-        items(dashboard.notifications, key = { it.id }) { notification ->
-            Card {
-                Text(notification.title, color = Color.White, fontWeight = FontWeight.Bold)
-                Text(notification.body, color = Color(0xFFA1A1AA), fontSize = 13.sp)
+@Composable
+fun TabBar(activeTab: String, onTabChange: (String) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        listOf("Overview", "Stats", "Trips", "Settings").forEach { tab ->
+            Button(
+                onClick = { onTabChange(tab) },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (activeTab == tab) Color.White else Color(0xFF18181B),
+                    contentColor = if (activeTab == tab) Color.Black else Color.White
+                )
+            ) {
+                Text(tab, fontSize = 12.sp)
             }
         }
     }
@@ -475,22 +586,8 @@ fun FuelRing(percentage: Double) {
     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(126.dp)) {
         Canvas(modifier = Modifier.size(120.dp)) {
             val stroke = Stroke(width = 16.dp.toPx(), cap = StrokeCap.Round)
-            drawArc(
-                color = Color(0xFF3F3F46),
-                startAngle = -90f,
-                sweepAngle = 360f,
-                useCenter = false,
-                style = stroke,
-                size = Size(size.width, size.height)
-            )
-            drawArc(
-                color = Color(0xFF10B981),
-                startAngle = -90f,
-                sweepAngle = (percentage / 100f * 360f).toFloat(),
-                useCenter = false,
-                style = stroke,
-                size = Size(size.width, size.height)
-            )
+            drawArc(Color(0xFF3F3F46), -90f, 360f, false, size = Size(size.width, size.height), style = stroke)
+            drawArc(Color(0xFF10B981), -90f, (percentage / 100f * 360f).toFloat(), false, size = Size(size.width, size.height), style = stroke)
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("${percentage.format0()}%", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
@@ -519,6 +616,24 @@ fun MiniBarChart(points: List<Double>, color: Color) {
             )
         }
     }
+}
+
+fun showLowFuelNotification(context: Context, percentage: Double) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        return
+    }
+
+    val intent = Intent(context, MainActivity::class.java)
+    val pendingIntent = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+    val notification = NotificationCompat.Builder(context, "smartfuel-alerts")
+        .setSmallIcon(android.R.drawable.ic_dialog_alert)
+        .setContentTitle("SmartFuel low fuel")
+        .setContentText("Estimated fuel is ${percentage.format0()}%, below the 70% alert level.")
+        .setContentIntent(pendingIntent)
+        .setAutoCancel(true)
+        .build()
+
+    NotificationManagerCompat.from(context).notify(70, notification)
 }
 
 @Composable

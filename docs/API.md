@@ -2,6 +2,15 @@
 
 Base URL for local development: `http://localhost:4000`
 
+Most read/write endpoints support an optional source query:
+
+```text
+?source=mock
+?source=firestore
+```
+
+Mock remains the default. Firestore requires Firebase environment variables.
+
 ## Health
 
 ### `GET /health`
@@ -22,6 +31,10 @@ Returns the combined dashboard payload:
 - statistics
 - maintenance records
 - notifications
+
+### `GET /api/data-source`
+
+Returns configured data source status for mock and Firestore.
 
 ## Fuel
 
@@ -63,9 +76,14 @@ Example body:
   "rpm": 2200,
   "sampleSeconds": 30,
   "engineLoadPercent": 48,
-  "coolantTempC": 89
+  "coolantTempC": 89,
+  "engineState": "driving",
+  "fuelSensorPercent": 76,
+  "fuelSensorState": "descending"
 }
 ```
+
+If `fuelSensorState` is `full` or `fuelSensorPercent` is `98` or higher, SmartFuel treats the sample as a full-tank reset signal.
 
 ## Trips
 

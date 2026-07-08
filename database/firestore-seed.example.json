@@ -1,0 +1,40 @@
+{
+  "vehicles/demo-vehicle": {
+    "name": "Daily Driver",
+    "make": "Toyota",
+    "model": "Corolla",
+    "year": 2008,
+    "status": "online",
+    "tankCapacityLiters": 40,
+    "maxRangeKm": 400,
+    "consumptionLitersPerKm": 0.1
+  },
+  "vehicles/demo-vehicle/runtime/fuel_state": {
+    "fuelRemainingLiters": 40,
+    "fuelUsedLiters": 0,
+    "estimatedRangeKm": 400,
+    "fuelPercentage": 100,
+    "lastFullResetAt": "2026-07-08T00:00:00.000Z",
+    "updatedAt": "2026-07-08T00:00:00.000Z"
+  },
+  "vehicles/demo-vehicle/runtime/current_status": {
+    "speedKph": 0,
+    "rpm": 0,
+    "engineState": "off",
+    "drivingIntensity": 1,
+    "engineLoadPercent": 0,
+    "coolantTempC": 0,
+    "batteryVoltage": null,
+    "estimatedOdometerKm": 128447.1,
+    "tripDistanceKm": 0,
+    "timestamp": "2026-07-08T00:00:00.000Z"
+  },
+  "vehicles/demo-vehicle/notifications/example-low-fuel": {
+    "type": "low_fuel",
+    "severity": "warning",
+    "title": "Fuel below 70%",
+    "body": "SmartFuel will push a phone notification when fuel is below 70%.",
+    "isRead": false,
+    "createdAt": "2026-07-08T00:00:00.000Z"
+  }
+}

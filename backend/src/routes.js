@@ -1,16 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { requireDeviceToken } from './middleware/auth.js'
-import {
-  addRefuel,
-  addTelemetry,
-  getDashboard,
-  getFuel,
-  getMaintenance,
-  getNotifications,
-  getStatistics,
-  getTrips,
-} from './data/demoStore.js'
+import { getDataSourceStatus, getStore } from './data/store.js'
 
 const router = Router()
 
@@ -27,6 +18,10 @@ const telemetrySchema = z.object({
   longitude: z.number().min(-180).max(180).optional(),
   timestamp: z.string().datetime().optional(),
   tripId: z.string().optional(),
+  engineState: z.enum(['off', 'idle', 'driving', 'unknown']).optional(),
+  fuelSensorPercent: z.number().min(0).max(100).optional(),
+  fuelSensorState: z.enum(['unknown', 'full', 'stuck', 'descending']).optional(),
+  obd: z.record(z.any()).optional(),
 })
 
 const refuelSchema = z.object({
@@ -51,46 +46,70 @@ function validate(schema) {
   }
 }
 
-router.get('/dashboard', (_req, res) => {
-  res.json(getDashboard())
+function asyncRoute(handler) {
+  return async (req, res, next) => {
+    try {
+      await handler(req, res)
+    } catch (error) {
+      next(error)
+    }
+  }
+}
+
+router.get('/data-source', (_req, res) => {
+  res.json(getDataSourceStatus())
 })
 
-router.get('/fuel', (_req, res) => {
-  res.json(getFuel())
-})
+router.get('/dashboard', asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  res.json(await store.getDashboard())
+}))
 
-router.get('/trips', (_req, res) => {
-  res.json({ trips: getTrips() })
-})
+router.get('/fuel', asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  res.json(await store.getFuel())
+}))
 
-router.get('/statistics', (_req, res) => {
-  res.json(getStatistics())
-})
+router.get('/trips', asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  res.json({ trips: await store.getTrips() })
+}))
 
-router.get('/maintenance', (_req, res) => {
-  res.json({ maintenance: getMaintenance() })
-})
+router.get('/statistics', asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  res.json(await store.getStatistics())
+}))
 
-router.get('/notifications', (_req, res) => {
-  res.json({ notifications: getNotifications() })
-})
+router.get('/maintenance', asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  res.json({ maintenance: await store.getMaintenance() })
+}))
 
-router.post('/telemetry', requireDeviceToken, validate(telemetrySchema), (req, res) => {
-  const log = addTelemetry(req.body)
+router.get('/notifications', asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  res.json({ notifications: await store.getNotifications() })
+}))
+
+router.post('/telemetry', requireDeviceToken, validate(telemetrySchema), asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  const log = await store.addTelemetry(req.body)
   res.status(201).json({
     message: 'Telemetry accepted',
+    source: req.query.source || 'mock',
     telemetry: log,
-    fuel: getFuel(),
+    fuel: await store.getFuel(),
   })
-})
+}))
 
-router.post('/refuel', validate(refuelSchema), (req, res) => {
-  const event = addRefuel(req.body)
+router.post('/refuel', validate(refuelSchema), asyncRoute(async (req, res) => {
+  const store = getStore(req.query.source)
+  const event = await store.addRefuel(req.body)
   res.status(201).json({
     message: 'Refuel event recorded',
+    source: req.query.source || 'mock',
     event,
-    fuel: getFuel(),
+    fuel: await store.getFuel(),
   })
-})
+}))
 
 export default router

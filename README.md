@@ -2,7 +2,11 @@
 
 SmartFuel is an end-to-end vehicle telemetry and fuel estimation system built for a car with a broken physical fuel gauge. It collects vehicle data, estimates fuel remaining, stores trip and maintenance history, and presents the data through a web dashboard and a native Android app.
 
-The project is designed like a commercial IoT product: edge telemetry, authenticated backend ingestion, PostgreSQL data modeling, REST APIs, responsive web UI, native mobile UI, offline-aware telemetry upload, and a path toward real OBD-II hardware integration.
+| Web Dashboard | Android App |
+|---|---|
+| ![SmartFuel web dashboard](screenshot1%28Desktop%29.png) | ![SmartFuel Android app](screenshot2%28phone%29.png) |
+
+The project is designed like a commercial IoT product: edge telemetry, Firestore-ready database sync, authenticated backend ingestion, REST APIs, responsive web UI, native mobile UI, offline-aware telemetry upload, and a path toward real OBD-II hardware integration.
 
 ## What It Does
 
@@ -12,7 +16,7 @@ The project is designed like a commercial IoT product: edge telemetry, authentic
 - Displays live vehicle status, trip history, fuel analytics, maintenance, and notifications.
 - Accepts telemetry from a Raspberry Pi service.
 - Provides the same backend API to the web app and Android app.
-- Includes a normalized Supabase PostgreSQL schema for production storage.
+- Includes Firestore-ready data flow, collection design, and source switching.
 
 ## System Flow
 
@@ -23,11 +27,11 @@ Vehicle OBD-II Port
   -> Python Telemetry Service
   -> 4G / Wi-Fi Internet
   -> Node.js Express API
-  -> PostgreSQL / Supabase
+  -> Firebase Firestore
   -> React Web Dashboard + Native Android App
 ```
 
-For the current development build, the Raspberry Pi service uses mock telemetry and the backend uses demo in-memory data. The interfaces are shaped so the mock layer can be replaced with real OBD-II and Supabase persistence without redesigning the clients.
+For the current development build, mock telemetry remains available by default. Firestore mode can be enabled from the mobile settings switch and by backend environment variables. The interfaces are shaped so the mock layer can be replaced with real OBD-II and Firestore persistence without redesigning the clients.
 
 ## Fuel Model
 
@@ -45,7 +49,7 @@ Calculated values:
 - `estimatedRangeKm = fuelRemainingLiters / 0.1`
 - `fuelPercentage = fuelRemainingLiters / tankCapacityLiters * 100`
 
-This model is intentionally transparent. Future versions can improve accuracy with real mass air flow, fuel rate PID values, GPS distance validation, driver profiles, and ML-based consumption prediction.
+This model is intentionally transparent. SmartFuel also applies a driving-intensity multiplier from RPM, speed, engine load, and idle state so short aggressive trips can consume more estimated fuel than calm trips.
 
 ## Tech Stack
 
@@ -56,12 +60,13 @@ This model is intentionally transparent. Future versions can improve accuracy wi
 | Telemetry service | Python | Strong hardware/serial ecosystem and simple background service deployment. |
 | Backend | Node.js + Express | Lightweight REST API, fast iteration, and easy integration with web/mobile clients. |
 | Validation | Zod | Runtime request validation for telemetry and refuel payloads. |
-| Database | Supabase PostgreSQL | Managed PostgreSQL, authentication support, relational integrity, and future realtime features. |
+| Database | Firebase Firestore | Realtime-friendly cloud document database for vehicle telemetry, current state, mobile reads, and future notifications. |
 | Web frontend | React + Vite | Fast modern web development and component-based dashboard UI. |
 | Styling | Tailwind CSS | Rapid responsive UI with consistent design tokens. |
 | Charts | Recharts | Simple React charting for speed, RPM, distance, and fuel history. |
 | Mobile app | Kotlin + Jetpack Compose | Native Android performance and modern declarative UI without React Native. |
 | Communication | REST over HTTP | Simple MVP protocol shared by Raspberry Pi, web, and Android clients. |
+| Optional relational design | PostgreSQL schema | Kept as a normalized reference for future reporting or analytics-heavy deployments. |
 | Future messaging | MQTT | Better fit for realtime IoT streams and unreliable networks. |
 
 ## Repository Structure
@@ -69,12 +74,36 @@ This model is intentionally transparent. Future versions can improve accuracy wi
 ```text
 SmartFuel/
   backend/        Node.js Express API, demo data, telemetry ingestion, fuel logic
-  database/       Supabase PostgreSQL schema and seed data
+  database/       Optional PostgreSQL schema and seed data reference
   frontend/       React, Vite, Tailwind, Recharts web dashboard
   android/        Native Kotlin + Jetpack Compose Android app
   raspberry-pi/   Python telemetry uploader with offline cache and retry
   docs/           API documentation
 ```
+
+## Firestore Data Flow
+
+SmartFuel is ready for Firestore integration without committing Firebase keys.
+
+```text
+Raspberry Pi reads OBD-II data
+  -> normalizes telemetry
+  -> uploads to Express API or Firestore
+  -> Firestore stores telemetry_logs and runtime current_status
+  -> web and Android request dashboard data
+  -> Android settings switch can move from mock to Firestore mode
+```
+
+Required environment variables:
+
+```text
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_WEB_API_KEY=your-web-api-key
+SMARTFUEL_FIRESTORE_VEHICLE_ID=your-vehicle-id
+SMARTFUEL_DATA_SOURCE=mock
+```
+
+The full diagrams and document model are in [docs/DATA_FLOW.md](docs/DATA_FLOW.md).
 
 ## Backend
 
@@ -86,7 +115,7 @@ The backend is responsible for:
 - Calculating fuel estimates.
 - Recording refuel events.
 - Serving dashboard, fuel, trips, statistics, maintenance, and notifications APIs.
-- Providing a future-ready boundary for Supabase Auth and multi-vehicle support.
+- Providing a future-ready boundary for Firebase Auth, Firestore, and multi-vehicle support.
 
 Local backend URL:
 
@@ -110,7 +139,20 @@ Full API documentation is in [docs/API.md](docs/API.md).
 
 ## Database Design
 
-The PostgreSQL schema is normalized and prepared for Supabase:
+The primary cloud database path is Firebase Firestore:
+
+- `vehicles/{vehicleId}`
+- `vehicles/{vehicleId}/runtime/fuel_state`
+- `vehicles/{vehicleId}/runtime/current_status`
+- `vehicles/{vehicleId}/telemetry_logs/{logId}`
+- `vehicles/{vehicleId}/trips/{tripId}`
+- `vehicles/{vehicleId}/refuel_events/{eventId}`
+- `vehicles/{vehicleId}/maintenance_records/{recordId}`
+- `vehicles/{vehicleId}/notifications/{notificationId}`
+
+The repository also includes an optional PostgreSQL reference schema for teams that later want relational reporting or exports.
+
+The PostgreSQL schema is normalized:
 
 - `users`
 - `cars`
@@ -160,6 +202,10 @@ The Android app is fully native:
 - Native HTTP client using Android/Java networking
 - SharedPreferences cache for the last successful dashboard payload
 - Same REST API contract as the web app
+- Settings tab with Mock/Firestore switch
+- Low-fuel phone notification below 70%
+- Overview, Stats, Trips, and Settings tabs
+- Collapsible fuel controls so full reset/refuel actions stay out of the way
 
 During USB development, the app calls:
 
@@ -191,9 +237,10 @@ android/app/build/outputs/apk/debug/app-debug.apk
 The Python service is structured like the real edge client:
 
 - Reads telemetry from a provider.
-- Generates mock OBD-style values in the current version.
+- Generates realistic mock OBD-style values in the current version.
 - Calculates distance increments.
 - Uploads telemetry to the backend.
+- Can be configured for Firestore upload mode.
 - Caches failed uploads locally.
 - Retries cached uploads when the backend is reachable again.
 - Includes a systemd service template for boot startup.
@@ -248,14 +295,14 @@ Current security measures:
 - Request validation with Zod.
 - Helmet HTTP security headers.
 - CORS restricted to the web frontend origin.
-- Clear database constraints for valid telemetry and fuel values.
+- Firestore-ready document model for valid telemetry and fuel values.
 - Environment-based configuration.
 
 Production security roadmap:
 
-- Supabase Auth for users.
+- Firebase Auth for users.
 - Hashed device tokens per vehicle.
-- Row Level Security policies in Supabase.
+- Firestore Security Rules for user and vehicle isolation.
 - HTTPS-only backend.
 - Refresh-token based mobile sessions.
 - Rate limiting for telemetry ingestion.
@@ -267,8 +314,9 @@ Production security roadmap:
 Planned improvements:
 
 - Real OBD-II adapter integration on Raspberry Pi.
-- Supabase persistence instead of in-memory demo data.
-- Supabase Auth email login and password reset.
+- Firestore production rules and Firebase Auth.
+- Real refuel cost tracking: liters, price per liter, total cost, station, odometer, and monthly fuel spending analysis.
+- Fuel economy summaries by trip, week, month, and driving style.
 - Multiple cars per user.
 - GPS location and route history.
 - Diagnostic trouble codes.

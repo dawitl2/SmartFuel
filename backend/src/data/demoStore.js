@@ -1,4 +1,11 @@
-import { applyRefuel, calculateFuelState, FUEL_CONSTANTS } from '../services/fuelService.js'
+import {
+  applyRefuel,
+  calculateFuelState,
+  calculateFuelUsedForSample,
+  deriveEngineState,
+  drivingIntensityMultiplier,
+  FUEL_CONSTANTS,
+} from '../services/fuelService.js'
 
 const now = new Date('2026-07-08T09:00:00.000Z')
 
@@ -78,8 +85,9 @@ const trips = [
 
 let totalDistanceSinceResetKm = 132
 let manualFuelCreditLiters = 0
+let drivingAdjustmentLiters = 0
 let fuelState = {
-  ...calculateFuelState(totalDistanceSinceResetKm, manualFuelCreditLiters),
+  ...calculateFuelState(totalDistanceSinceResetKm, manualFuelCreditLiters, drivingAdjustmentLiters),
   lastFullResetAt: '2026-07-03T06:30:00.000Z',
   updatedAt: now.toISOString(),
 }
@@ -189,10 +197,19 @@ export function getDashboard() {
 
   return {
     car,
+    source: 'mock',
+    settings: {
+      tankCapacityLiters: FUEL_CONSTANTS.tankCapacityLiters,
+      maxRangeKm: FUEL_CONSTANTS.maxRangeKm,
+      lowFuelNotificationPercent: 70,
+      firestoreReady: false,
+    },
     fuel: fuelState,
     liveStatus: {
       speedKph: latest.speedKph,
       rpm: latest.rpm,
+      engineState: deriveEngineState(latest),
+      drivingIntensity: drivingIntensityMultiplier(latest),
       coolantTempC: latest.coolantTempC,
       engineLoadPercent: latest.engineLoadPercent,
       estimatedOdometerKm: latest.estimatedOdometerKm,
@@ -208,7 +225,7 @@ export function getDashboard() {
     charts: chartSeries(),
     statistics: statistics(),
     maintenance: maintenanceRecords,
-    notifications,
+    notifications: buildNotifications(),
   }
 }
 
@@ -233,7 +250,7 @@ export function getMaintenance() {
 }
 
 export function getNotifications() {
-  return notifications
+  return buildNotifications()
 }
 
 export function addTelemetry(payload) {
@@ -257,12 +274,37 @@ export function addTelemetry(payload) {
     batteryVoltage: payload.batteryVoltage ?? null,
     latitude: payload.latitude ?? null,
     longitude: payload.longitude ?? null,
+    engineState: payload.engineState ?? deriveEngineState(payload),
+    fuelSensorPercent: payload.fuelSensorPercent ?? null,
+    fuelSensorState: payload.fuelSensorState ?? null,
+    obd: payload.obd ?? null,
   }
 
   telemetryLogs.push(log)
+
+  if (payload.fuelSensorState === 'full' || payload.fuelSensorPercent >= 98) {
+    totalDistanceSinceResetKm = 0
+    manualFuelCreditLiters = 0
+    drivingAdjustmentLiters = 0
+    fuelState.lastFullResetAt = recordedAt
+    refuelEvents.push({
+      id: `refuel-demo-${refuelEvents.length + 1}`,
+      carId: car.id,
+      eventType: 'full_reset',
+      litersAdded: FUEL_CONSTANTS.tankCapacityLiters,
+      fuelAfterLiters: FUEL_CONSTANTS.tankCapacityLiters,
+      odometerKm: log.estimatedOdometerKm,
+      note: 'Automatic full-tank reset from fuel sensor full signal.',
+      createdAt: recordedAt,
+    })
+  }
+
+  const sampleFuelUsed = calculateFuelUsedForSample(log)
+  const baseFuelUsed = distanceIncrementKm * FUEL_CONSTANTS.consumptionLitersPerKm
+  drivingAdjustmentLiters += Math.max(0, sampleFuelUsed - baseFuelUsed)
   totalDistanceSinceResetKm += distanceIncrementKm
   fuelState = {
-    ...calculateFuelState(totalDistanceSinceResetKm, manualFuelCreditLiters),
+    ...calculateFuelState(totalDistanceSinceResetKm, manualFuelCreditLiters, drivingAdjustmentLiters),
     lastFullResetAt: fuelState.lastFullResetAt,
     updatedAt: recordedAt,
   }
@@ -281,6 +323,7 @@ export function addRefuel({ eventType, litersAdded = 0, note = '' }) {
   if (eventType === 'full_reset') {
     totalDistanceSinceResetKm = 0
     manualFuelCreditLiters = 0
+    drivingAdjustmentLiters = 0
   } else {
     manualFuelCreditLiters += litersAdded
   }
@@ -310,4 +353,35 @@ export function addRefuel({ eventType, litersAdded = 0, note = '' }) {
 
   refuelEvents.push(event)
   return event
+}
+
+function buildNotifications() {
+  const dynamic = []
+
+  if (fuelState.fuelPercentage <= 70) {
+    dynamic.push({
+      id: 'notification-low-fuel-live',
+      type: 'low_fuel',
+      severity: fuelState.fuelPercentage <= 15 ? 'critical' : 'warning',
+      title: 'Fuel below 70%',
+      body: `Estimated fuel is ${fuelState.fuelPercentage}%. The Android app can push a local low-fuel notification below 70%.`,
+      isRead: false,
+      createdAt: fuelState.updatedAt,
+    })
+  }
+
+  const latest = telemetryLogs.at(-1)
+  if (latest?.rpm > 4200) {
+    dynamic.push({
+      id: 'notification-high-rpm-live',
+      type: 'high_rpm',
+      severity: 'warning',
+      title: 'High RPM detected',
+      body: `Latest sample reported ${latest.rpm} rpm. Aggressive driving increases estimated fuel use.`,
+      isRead: false,
+      createdAt: latest.recordedAt,
+    })
+  }
+
+  return [...dynamic, ...notifications]
 }

@@ -1,0 +1,2 @@
+# Current mock/backend mode uses only the Python standard library.
+# Future direct Firestore mode can use firebase-admin or authenticated Google Cloud clients.

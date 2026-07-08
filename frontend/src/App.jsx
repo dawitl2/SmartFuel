@@ -10,6 +10,7 @@ import {
   Gauge,
   History,
   Moon,
+  SlidersHorizontal,
   Settings,
   Sun,
   Thermometer,
@@ -30,7 +31,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { createRefuelEvent, getDashboard } from './api'
+import { createRefuelEvent, getDashboard, getDataSourceStatus } from './api'
 
 function App() {
   const [dashboard, setDashboard] = useState(null)
@@ -39,11 +40,14 @@ function App() {
   const [theme, setTheme] = useState('dark')
   const [refuelLiters, setRefuelLiters] = useState(5)
   const [savingRefuel, setSavingRefuel] = useState(false)
+  const [dataSource, setDataSource] = useState(() => localStorage.getItem('smartfuel-source') || 'mock')
+  const [controlsOpen, setControlsOpen] = useState(false)
+  const [sourceStatus, setSourceStatus] = useState(null)
 
-  async function loadDashboard() {
+  async function loadDashboard(source = dataSource) {
     try {
       setError('')
-      const data = await getDashboard()
+      const data = await getDashboard(source)
       setDashboard(data)
     } catch (err) {
       setError(err.message)
@@ -53,8 +57,9 @@ function App() {
   }
 
   useEffect(() => {
-    loadDashboard()
-  }, [])
+    loadDashboard(dataSource)
+    getDataSourceStatus().then(setSourceStatus).catch(() => {})
+  }, [dataSource])
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
@@ -102,8 +107,8 @@ function App() {
         eventType,
         litersAdded: eventType === 'full_reset' ? 40 : Number(refuelLiters),
         note: eventType === 'full_reset' ? 'Dashboard full tank reset.' : 'Dashboard partial refuel.',
-      })
-      await loadDashboard()
+      }, dataSource)
+      await loadDashboard(dataSource)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -112,7 +117,12 @@ function App() {
   }
 
   if (loading) return <LoadingScreen />
-  if (error && !dashboard) return <ErrorScreen message={error} onRetry={loadDashboard} />
+  if (error && !dashboard) return <ErrorScreen message={error} onRetry={() => loadDashboard(dataSource)} />
+
+  function handleSourceChange(nextSource) {
+    setDataSource(nextSource)
+    localStorage.setItem('smartfuel-source', nextSource)
+  }
 
   return (
     <main className="min-h-screen bg-zinc-100 text-zinc-950 transition-colors dark:bg-neutral-950 dark:text-zinc-50">
@@ -160,6 +170,15 @@ function App() {
               </div>
               <div className="flex items-center gap-2">
                 <StatusPill status={dashboard.car.status} />
+                <SourcePill source={dashboard.source || dataSource} />
+                <button
+                  aria-label="Open settings"
+                  className="inline-flex size-10 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 shadow-sm dark:border-white/10 dark:bg-white/10 dark:text-zinc-100"
+                  onClick={() => setControlsOpen((value) => !value)}
+                  type="button"
+                >
+                  <SlidersHorizontal size={18} />
+                </button>
                 <button
                   aria-label="Toggle theme"
                   className="inline-flex size-10 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 shadow-sm dark:border-white/10 dark:bg-white/10 dark:text-zinc-100"
@@ -185,11 +204,47 @@ function App() {
               ))}
             </section>
 
+            {controlsOpen ? (
+              <Panel id="settings" title="Settings" icon={Settings}>
+                <div className="grid gap-4 lg:grid-cols-3">
+                  <div>
+                    <p className="text-sm font-semibold">Data source</p>
+                    <div className="mt-3 inline-flex rounded-md border border-zinc-200 bg-zinc-50 p-1 dark:border-white/10 dark:bg-white/5">
+                      {['mock', 'firestore'].map((source) => (
+                        <button
+                          className={`rounded px-3 py-1.5 text-sm font-semibold ${
+                            dataSource === source
+                              ? 'bg-zinc-950 text-white dark:bg-white dark:text-zinc-950'
+                              : 'text-zinc-500 dark:text-zinc-400'
+                          }`}
+                          key={source}
+                          onClick={() => handleSourceChange(source)}
+                          type="button"
+                        >
+                          {source}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <Readout label="Tank Capacity" value={`${dashboard.settings?.tankCapacityLiters || 40} L`} />
+                  <Readout label="Max Range" value={`${dashboard.settings?.maxRangeKm || 400} km`} />
+                  <Readout
+                    label="Firestore"
+                    value={sourceStatus?.sources?.firestore?.configured ? 'Configured' : 'Needs env'}
+                  />
+                  <Readout label="Low Fuel Push" value="Below 70%" />
+                  <Readout label="Controls" value="Collapsed by default" />
+                </div>
+              </Panel>
+            ) : null}
+
             <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
               <Panel id="live-status" title="Live Vehicle Status" icon={Car}>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Readout label="Vehicle" value={`${dashboard.car.year} ${dashboard.car.make} ${dashboard.car.model}`} />
+                  <Readout label="Engine" value={dashboard.liveStatus.engineState || 'unknown'} />
                   <Readout label="Estimated Odometer" value={`${dashboard.liveStatus.estimatedOdometerKm.toLocaleString()} km`} />
+                  <Readout label="Intensity" value={`${dashboard.liveStatus.drivingIntensity || 1}x`} />
                   <Readout label="Coolant" value={`${dashboard.liveStatus.coolantTempC} C`} icon={Thermometer} />
                   <Readout label="Engine Load" value={`${dashboard.liveStatus.engineLoadPercent}%`} icon={Activity} />
                   <Readout label="Trip Distance" value={`${dashboard.liveStatus.tripDistanceKm} km`} />
@@ -347,6 +402,14 @@ function StatusPill({ status }) {
     <span className="inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300">
       <span className="size-2 rounded-full bg-emerald-500" />
       {status}
+    </span>
+  )
+}
+
+function SourcePill({ source }) {
+  return (
+    <span className="inline-flex items-center rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-semibold text-zinc-600 dark:border-white/10 dark:bg-white/10 dark:text-zinc-300">
+      {source}
     </span>
   )
 }

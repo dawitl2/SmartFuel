@@ -17,13 +17,17 @@ async function request(path, options = {}) {
   return response.json()
 }
 
-export function getDashboard() {
-  return request('/api/dashboard')
+export function getDashboard(source = 'mock') {
+  return request(`/api/dashboard?source=${encodeURIComponent(source)}`)
 }
 
-export function createRefuelEvent(payload) {
-  return request('/api/refuel', {
+export function createRefuelEvent(payload, source = 'mock') {
+  return request(`/api/refuel?source=${encodeURIComponent(source)}`, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+export function getDataSourceStatus() {
+  return request('/api/data-source')
 }

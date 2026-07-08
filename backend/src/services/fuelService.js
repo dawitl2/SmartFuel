@@ -4,8 +4,23 @@ export const FUEL_CONSTANTS = {
   consumptionLitersPerKm: 0.1,
 }
 
-export function calculateFuelState(distanceKm, litersAdded = 0) {
-  const fuelUsedLiters = Number((distanceKm * FUEL_CONSTANTS.consumptionLitersPerKm).toFixed(2))
+export function drivingIntensityMultiplier({ speedKph = 0, rpm = 0, engineLoadPercent = 0 } = {}) {
+  if (speedKph <= 1 && rpm > 500) return 1.25
+
+  const rpmPenalty = rpm > 4200 ? 0.45 : rpm > 3200 ? 0.25 : rpm > 2500 ? 0.12 : 0
+  const loadPenalty = engineLoadPercent > 80 ? 0.25 : engineLoadPercent > 60 ? 0.12 : 0
+  const cityPenalty = speedKph > 0 && speedKph < 25 ? 0.12 : 0
+
+  return Number((1 + rpmPenalty + loadPenalty + cityPenalty).toFixed(2))
+}
+
+export function calculateFuelUsedForSample({ distanceIncrementKm = 0, speedKph = 0, rpm = 0, engineLoadPercent = 0 } = {}) {
+  const multiplier = drivingIntensityMultiplier({ speedKph, rpm, engineLoadPercent })
+  return Number((distanceIncrementKm * FUEL_CONSTANTS.consumptionLitersPerKm * multiplier).toFixed(4))
+}
+
+export function calculateFuelState(distanceKm, litersAdded = 0, drivingAdjustmentLiters = 0) {
+  const fuelUsedLiters = Number((distanceKm * FUEL_CONSTANTS.consumptionLitersPerKm + drivingAdjustmentLiters).toFixed(2))
   const fuelRemainingLiters = Math.min(
     FUEL_CONSTANTS.tankCapacityLiters,
     Math.max(0, FUEL_CONSTANTS.tankCapacityLiters - fuelUsedLiters + litersAdded),
@@ -21,6 +36,12 @@ export function calculateFuelState(distanceKm, litersAdded = 0) {
     estimatedRangeKm,
     fuelPercentage,
   }
+}
+
+export function deriveEngineState({ speedKph = 0, rpm = 0 } = {}) {
+  if (rpm <= 100) return 'off'
+  if (speedKph <= 1) return 'idle'
+  return 'driving'
 }
 
 export function applyRefuel(currentFuelLiters, litersAdded, eventType) {
