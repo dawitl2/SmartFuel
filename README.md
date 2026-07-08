@@ -4,7 +4,7 @@ SmartFuel is an end-to-end vehicle telemetry and fuel estimation system built fo
 
 | Web Dashboard | Android App |
 |---|---|
-| ![SmartFuel web dashboard](screenshot1%28Desktop%29.png) | ![SmartFuel Android app](screenshot2%28phone%29.png) |
+| <img src="screenshot1%28Desktop%29.png" alt="SmartFuel web dashboard" height="360"> | <img src="screenshot2%28phone%29.png" alt="SmartFuel Android app" height="360"> |
 
 The project is designed like a commercial IoT product: edge telemetry, Firestore-ready database sync, authenticated backend ingestion, REST APIs, responsive web UI, native mobile UI, offline-aware telemetry upload, and a path toward real OBD-II hardware integration.
 
@@ -117,12 +117,6 @@ The backend is responsible for:
 - Serving dashboard, fuel, trips, statistics, maintenance, and notifications APIs.
 - Providing a future-ready boundary for Firebase Auth, Firestore, and multi-vehicle support.
 
-Local backend URL:
-
-```text
-http://localhost:4000
-```
-
 Important endpoints:
 
 - `GET /health`
@@ -187,12 +181,6 @@ The React dashboard provides:
 - Light and dark mode.
 - Responsive layout for desktop and mobile browsers.
 
-Local web URL:
-
-```text
-http://127.0.0.1:5173
-```
-
 ## Android App
 
 The Android app is fully native:
@@ -206,18 +194,6 @@ The Android app is fully native:
 - Low-fuel phone notification below 70%
 - Overview, Stats, Trips, and Settings tabs
 - Collapsible fuel controls so full reset/refuel actions stay out of the way
-
-During USB development, the app calls:
-
-```text
-http://127.0.0.1:4000
-```
-
-Use adb reverse so the phone can reach the computer backend:
-
-```powershell
-adb reverse tcp:4000 tcp:4000
-```
 
 Build and install helper:
 
@@ -298,35 +274,18 @@ Current security measures:
 - Firestore-ready document model for valid telemetry and fuel values.
 - Environment-based configuration.
 
-Production security roadmap:
-
-- Firebase Auth for users.
-- Hashed device tokens per vehicle.
-- Firestore Security Rules for user and vehicle isolation.
-- HTTPS-only backend.
-- Refresh-token based mobile sessions.
-- Rate limiting for telemetry ingestion.
-- Audit logs for refuel and maintenance events.
-- Secrets stored in platform-managed secret stores.
-
 ## Production Roadmap
 
 Planned improvements:
 
-- Real OBD-II adapter integration on Raspberry Pi.
-- Firestore production rules and Firebase Auth.
 - Real refuel cost tracking: liters, price per liter, total cost, station, odometer, and monthly fuel spending analysis.
 - Fuel economy summaries by trip, week, month, and driving style.
 - Multiple cars per user.
 - GPS location and route history.
 - Diagnostic trouble codes.
 - Battery voltage monitoring.
-- Push notifications.
-- MQTT telemetry streaming.
 - Predictive maintenance.
 - Fuel consumption prediction.
-- PDF/CSV reports.
-- Admin and fleet dashboard.
 
 ## Why This Project Matters
 
