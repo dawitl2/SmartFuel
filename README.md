@@ -33,7 +33,7 @@ Vehicle OBD-II Port
 
 For the current development build, mock telemetry remains available by default. Firestore mode can be enabled from the mobile settings switch and by backend environment variables. When Firestore mode is selected, the app requests database data only; it does not silently fall back to demo trips, charts, or notifications.
 
-<img src="Frame1000002306.png.png" alt="" height="360">
+<img src="Frame1000002306.png" alt="" height="360">
 
 ## Fuel Model
 
