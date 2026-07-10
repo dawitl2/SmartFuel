@@ -1,6 +1,7 @@
 package com.smartfuel.mobile
 
 import android.Manifest
+import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -9,8 +10,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -34,11 +37,14 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -57,11 +63,14 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -142,6 +151,11 @@ data class ManualState(
     val alertKm: Double = 150.0,
     val kilometersDriven: Double = 0.0,
     val alertSent: Boolean = false,
+    val trackingEnabled: Boolean = true,
+    val homeWifiSsid: String = "EnQ",
+    val placeRadiusMeters: Double = 20.0,
+    val stopRadiusMeters: Double = 10.0,
+    val stopMinutes: Double = 30.0,
     val homeLat: Double? = null,
     val homeLon: Double? = null,
     val places: List<ManualPlace> = emptyList(),
@@ -150,9 +164,13 @@ data class ManualState(
     val pendingPlaceName: String? = null,
     val pendingKm: Double = 0.0,
     val pendingMessage: String? = null,
+    val pendingLat: Double? = null,
+    val pendingLon: Double? = null,
     val lastPromptPlaceId: String? = null,
     val lastLat: Double? = null,
     val lastLon: Double? = null,
+    val tripStartLat: Double? = null,
+    val tripStartLon: Double? = null,
     val stationarySinceMs: Long = 0L
 ) {
     val remainingKm: Double get() = (maxTrackedKm - kilometersDriven).coerceIn(0.0, maxTrackedKm)
@@ -308,6 +326,7 @@ fun SmartFuelApp() {
     var activeTab by remember { mutableStateOf("Overview") }
     var controlsOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var activeManualPanel by remember { mutableStateOf<String?>(null) }
 
     fun saveManual(next: ManualState) {
         val withAlert = if (next.kilometersDriven >= next.alertKm && !next.alertSent) {
@@ -366,7 +385,18 @@ fun SmartFuelApp() {
     }
 
     LaunchedEffect(Unit) { load() }
+    LaunchedEffect(dataSource, manualState.trackingEnabled) {
+        updateManualTrackingService(context, dataSource, manualState)
+    }
+    LaunchedEffect(dataSource) {
+        while (dataSource == "manual") {
+            val latest = loadManualState(prefs)
+            if (latest != manualState) manualState = latest
+            delay(2000)
+        }
+    }
     BackHandler(settingsOpen) { settingsOpen = false }
+    BackHandler(activeManualPanel != null) { activeManualPanel = null }
 
     Surface(color = Color(0xFF0A0A0A), modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
@@ -403,11 +433,43 @@ fun SmartFuelApp() {
             if (settingsOpen) {
                 SettingsDrawer(
                     dataSource = dataSource,
+                    state = manualState,
                     onSourceChange = {
                         settingsOpen = false
                         changeSource(it)
                     },
+                    onOpenPanel = {
+                        settingsOpen = false
+                        activeManualPanel = it
+                    },
                     onClose = { settingsOpen = false }
+                )
+            }
+
+            when (activeManualPanel) {
+                "manual" -> ManualEntryDialog(
+                    state = manualState,
+                    onSaveState = ::saveManual,
+                    onClose = { activeManualPanel = null }
+                )
+                "dedicated" -> PlacesDialog(
+                    title = "Dedicated Places",
+                    state = manualState,
+                    surprise = false,
+                    onSaveState = ::saveManual,
+                    onClose = { activeManualPanel = null }
+                )
+                "surprise" -> PlacesDialog(
+                    title = "Surprise Places",
+                    state = manualState,
+                    surprise = true,
+                    onSaveState = ::saveManual,
+                    onClose = { activeManualPanel = null }
+                )
+                "location" -> ManualSettingsDialog(
+                    state = manualState,
+                    onSaveState = ::saveManual,
+                    onClose = { activeManualPanel = null }
                 )
             }
         }
@@ -446,7 +508,7 @@ fun DashboardView(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Button(onClick = onOpenSettings, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF18181B))) {
-                        Text("Settings", fontSize = 12.sp)
+                        Text("☰", fontSize = 20.sp)
                     }
                     Spacer(Modifier.height(6.dp))
                     StatusBadge(if (online) dashboard.liveStatus.engineState else "cached")
@@ -571,39 +633,15 @@ fun DashboardView(
 fun ManualModeView(state: ManualState, onSaveState: (ManualState) -> Unit, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
     var quickKm by remember { mutableStateOf("10") }
-    var placeName by remember { mutableStateOf("") }
-    var placeKm by remember { mutableStateOf("") }
-    var surpriseName by remember { mutableStateOf("") }
-    var surpriseKm by remember { mutableStateOf("") }
-    var selectedDays by remember { mutableStateOf(setOf("Mon")) }
-    var locationMessage by remember { mutableStateOf<String?>(null) }
+    var manualOpen by remember { mutableStateOf(false) }
 
     fun save(next: ManualState) = onSaveState(next)
     fun addDistance(km: Double) {
         save(state.copy(kilometersDriven = (state.kilometersDriven + km).coerceIn(0.0, state.maxTrackedKm)))
     }
-    fun currentLocation(): Location? = getLastKnownLocation(context)
-    fun addPlace(name: String, kmText: String, days: List<String>, surprise: Boolean) {
-        val km = kmText.toDoubleOrNull() ?: return
-        if (name.isBlank() || km <= 0.0) return
-        val loc = currentLocation()
-        val place = ManualPlace(
-            id = UUID.randomUUID().toString(),
-            name = name.trim(),
-            kilometers = km,
-            days = days,
-            latitude = loc?.latitude,
-            longitude = loc?.longitude
-        )
-        if (surprise) {
-            save(state.copy(surprisePlaces = state.surprisePlaces + place))
-            surpriseName = ""
-            surpriseKm = ""
-        } else {
-            save(state.copy(places = state.places + place))
-            placeName = ""
-            placeKm = ""
-        }
+
+    if (state.pendingMessage != null) {
+        PendingTripDialog(state = state, onSaveState = onSaveState)
     }
 
     LazyColumn(
@@ -618,10 +656,10 @@ fun ManualModeView(state: ManualState, onSaveState: (ManualState) -> Unit, onOpe
                 Column(modifier = Modifier.weight(1f)) {
                     Text("SmartFuel", color = Color(0xFF34D399), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Text("Manual Fuel", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                    Text("Local 200 km fuel tracker", color = Color(0xFFA1A1AA))
+                    Text(if (state.trackingEnabled) "Auto trip assist is running" else "Auto trip assist is off", color = Color(0xFFA1A1AA))
                 }
                 Button(onClick = onOpenSettings, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF18181B))) {
-                    Text("Settings", fontSize = 12.sp)
+                    Text("☰", fontSize = 20.sp)
                 }
             }
         }
@@ -634,44 +672,7 @@ fun ManualModeView(state: ManualState, onSaveState: (ManualState) -> Unit, onOpe
                     Column(modifier = Modifier.weight(1f)) {
                         Text("${state.remainingKm.format0()} km", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
                         Text("${state.remainingLiters.format1()} L estimated", color = Color(0xFFA1A1AA))
-                        Text("${state.kilometersDriven.format1()} km driven from 200 km", color = Color(0xFFA1A1AA))
-                    }
-                }
-            }
-        }
-
-        if (state.pendingMessage != null) {
-            item {
-                Card {
-                    Text("Location suggestion", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(6.dp))
-                    Text(state.pendingMessage, color = Color(0xFFA1A1AA), fontSize = 13.sp)
-                    if (state.pendingKm > 0.0) {
-                        Spacer(Modifier.height(12.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                            Button(onClick = {
-                                save(state.copy(
-                                    kilometersDriven = (state.kilometersDriven + state.pendingKm).coerceIn(0.0, state.maxTrackedKm),
-                                    pendingMessage = null,
-                                    pendingPlaceId = null
-                                ))
-                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
-                                Text("One way", fontSize = 12.sp)
-                            }
-                            Button(onClick = {
-                                save(state.copy(
-                                    kilometersDriven = (state.kilometersDriven + state.pendingKm * 2.0).coerceIn(0.0, state.maxTrackedKm),
-                                    pendingMessage = null,
-                                    pendingPlaceId = null
-                                ))
-                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
-                                Text("Round", fontSize = 12.sp)
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Button(onClick = { save(state.copy(pendingMessage = null, pendingPlaceId = null)) }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
-                        Text("Ignore")
+                        Text("${state.kilometersDriven.format1()} km driven from ${state.maxTrackedKm.format0()} km", color = Color(0xFFA1A1AA))
                     }
                 }
             }
@@ -680,124 +681,363 @@ fun ManualModeView(state: ManualState, onSaveState: (ManualState) -> Unit, onOpe
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
                 Metric("Driven", "${state.kilometersDriven.format0()} km", Modifier.weight(1f))
-                Metric("Alert", "${state.alertKm.format0()} km", Modifier.weight(1f))
+                Metric("Remaining", "${state.remainingKm.format0()} km", Modifier.weight(1f))
             }
         }
 
         item {
             Card {
-                Text("Manual Entry", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = quickKm,
-                        onValueChange = { quickKm = it },
-                        label = { Text("Kilometers") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Button(onClick = { addDistance(quickKm.toDoubleOrNull() ?: 0.0) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
-                        Text("Add")
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Manual Entry", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text("Add distance or reset after refuel.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                    }
+                    Button(onClick = { manualOpen = !manualOpen }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                        Text(if (manualOpen) "Hide" else "Extend")
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                if (manualOpen) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        DarkTextField(
+                            value = quickKm,
+                            onValueChange = { quickKm = it },
+                            label = "Kilometers",
+                            modifier = Modifier.weight(1f),
+                            numeric = true
+                        )
+                        Button(onClick = { addDistance(quickKm.toDoubleOrNull() ?: 0.0) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                            Text("Add")
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
                     Button(onClick = {
                         save(state.copy(kilometersDriven = 0.0, alertSent = false, pendingMessage = null, pendingPlaceId = null))
-                    }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
-                        Text("Refill")
+                    }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
+                        Text("Refill / Reset")
                     }
-                    Button(onClick = {
-                        val loc = currentLocation()
-                        if (loc == null) {
-                            locationMessage = "Location is unavailable. Allow location permission and open Maps/GPS once if needed."
-                        } else {
-                            save(state.copy(homeLat = loc.latitude, homeLon = loc.longitude))
-                            locationMessage = "Home location saved."
-                        }
-                    }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
-                        Text("Home")
-                    }
-                }
-                if (locationMessage != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(locationMessage.orEmpty(), color = Color(0xFFFDE68A), fontSize = 13.sp)
                 }
             }
         }
 
         item {
             Card {
-                Text("Smart Location", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text("Trip Assist", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Text("Checks saved places and long stops while the app is open.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
-                Spacer(Modifier.height(10.dp))
-                Button(onClick = {
-                    val checked = refreshManualLocationSuggestion(context, state)
-                    if (checked === state) {
-                        locationMessage = "No saved place or long stop detected yet."
-                    } else {
-                        save(checked)
-                        if (checked.pendingMessage != null) showManualLocationNotification(context, checked.pendingMessage)
-                    }
-                }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
-                    Text("Check Location")
-                }
+                Text("Known places: ${state.places.size}. Surprise places: ${state.surprisePlaces.size}. Home Wi-Fi: ${state.homeWifiSsid}.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (state.trackingEnabled && !hasLocationPermission(context)) "GPS permission is missing. Open Manual Settings to allow it." else "Open the menu to edit places, alert distance, Wi-Fi and location rules.",
+                    color = if (state.trackingEnabled && !hasLocationPermission(context)) Color(0xFFFDE68A) else Color(0xFF34D399),
+                    fontSize = 13.sp
+                )
             }
-        }
-
-        item {
-            Card {
-                Text("Designated Places", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(value = placeName, onValueChange = { placeName = it }, label = { Text("Place name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(value = placeKm, onValueChange = { placeKm = it }, label = { Text("One-way km") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                DayPicker(selectedDays = selectedDays, onChange = { selectedDays = it })
-                Spacer(Modifier.height(10.dp))
-                Button(onClick = { addPlace(placeName, placeKm, selectedDays.toList(), false) }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
-                    Text("Add designated place")
-                }
-            }
-        }
-
-        items(state.places, key = { it.id }) { place ->
-            ManualPlaceCard(
-                place = place,
-                onOneWay = { addDistance(place.kilometers) },
-                onRoundTrip = { addDistance(place.kilometers * 2.0) },
-                onRemove = { save(state.copy(places = state.places.filterNot { it.id == place.id })) }
-            )
-        }
-
-        item {
-            Card {
-                Text("Surprise Places", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(value = surpriseName, onValueChange = { surpriseName = it }, label = { Text("Place name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(value = surpriseKm, onValueChange = { surpriseKm = it }, label = { Text("One-way km") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(10.dp))
-                Button(onClick = { addPlace(surpriseName, surpriseKm, emptyList(), true) }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
-                    Text("Add surprise place")
-                }
-            }
-        }
-
-        items(state.surprisePlaces, key = { it.id }) { place ->
-            ManualPlaceCard(
-                place = place,
-                onOneWay = { addDistance(place.kilometers) },
-                onRoundTrip = { addDistance(place.kilometers * 2.0) },
-                onRemove = { save(state.copy(surprisePlaces = state.surprisePlaces.filterNot { it.id == place.id })) }
-            )
         }
     }
 }
 
 @Composable
-fun ManualPlaceCard(place: ManualPlace, onOneWay: () -> Unit, onRoundTrip: () -> Unit, onRemove: () -> Unit) {
+fun PendingTripDialog(state: ManualState, onSaveState: (ManualState) -> Unit) {
+    var distanceText by remember(state.pendingMessage) { mutableStateOf(state.pendingKm.takeIf { it > 0.0 }?.format1() ?: "") }
+    var saveAsSurprise by remember(state.pendingMessage) { mutableStateOf(false) }
+    var saveAsDedicated by remember(state.pendingMessage) { mutableStateOf(false) }
+    var placeName by remember(state.pendingMessage) { mutableStateOf(state.pendingPlaceName ?: "New destination") }
+    val distance = distanceText.toDoubleOrNull() ?: 0.0
+
+    fun clearPending(next: ManualState = state): ManualState = next.copy(
+        pendingPlaceId = null,
+        pendingPlaceName = null,
+        pendingKm = 0.0,
+        pendingMessage = null,
+        pendingLat = null,
+        pendingLon = null
+    )
+
+    Dialog(onDismissRequest = { onSaveState(clearPending()) }) {
+        Card {
+            Text("Trip Check", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(state.pendingMessage.orEmpty(), color = Color(0xFFA1A1AA), fontSize = 13.sp)
+            Spacer(Modifier.height(12.dp))
+            DarkTextField(
+                value = distanceText,
+                onValueChange = { distanceText = it },
+                label = "Distance to subtract",
+                modifier = Modifier.fillMaxWidth(),
+                numeric = true
+            )
+            Spacer(Modifier.height(8.dp))
+            DarkTextField(
+                value = placeName,
+                onValueChange = { placeName = it },
+                label = "Place name",
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+            CheckRow("Save as surprise place", saveAsSurprise) {
+                saveAsSurprise = it
+                if (it) saveAsDedicated = false
+            }
+            CheckRow("Save as dedicated place", saveAsDedicated) {
+                saveAsDedicated = it
+                if (it) saveAsSurprise = false
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { onSaveState(clearPending()) }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                    Text("No")
+                }
+                Button(
+                    onClick = {
+                        val place = ManualPlace(
+                            id = UUID.randomUUID().toString(),
+                            name = placeName.ifBlank { "Saved place" },
+                            kilometers = distance.coerceAtLeast(0.0),
+                            days = emptyList(),
+                            latitude = state.pendingLat,
+                            longitude = state.pendingLon
+                        )
+                        val withDistance = state.copy(kilometersDriven = (state.kilometersDriven + distance).coerceIn(0.0, state.maxTrackedKm))
+                        val withSavedPlace = when {
+                            saveAsSurprise && distance > 0.0 -> withDistance.copy(surprisePlaces = withDistance.surprisePlaces + place)
+                            saveAsDedicated && distance > 0.0 -> withDistance.copy(places = withDistance.places + place.copy(days = listOf("Mon")))
+                            else -> withDistance
+                        }
+                        onSaveState(clearPending(withSavedPlace))
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                ) {
+                    Text("Confirm")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ManualEntryDialog(state: ManualState, onSaveState: (ManualState) -> Unit, onClose: () -> Unit) {
+    var km by remember { mutableStateOf("10") }
+    Dialog(onDismissRequest = onClose) {
+        Card {
+            Text("Manual Entry", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text("Add a driven distance or reset the local counter after refilling.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+            Spacer(Modifier.height(12.dp))
+            DarkTextField(km, { km = it }, "Kilometers", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = {
+                    onSaveState(state.copy(kilometersDriven = (state.kilometersDriven + (km.toDoubleOrNull() ?: 0.0)).coerceIn(0.0, state.maxTrackedKm)))
+                    onClose()
+                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                    Text("Add")
+                }
+                Button(onClick = {
+                    onSaveState(state.copy(kilometersDriven = 0.0, alertSent = false, pendingMessage = null))
+                    onClose()
+                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
+                    Text("Refill")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PlacesDialog(title: String, state: ManualState, surprise: Boolean, onSaveState: (ManualState) -> Unit, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val places = if (surprise) state.surprisePlaces else state.places
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var name by remember { mutableStateOf("") }
+    var km by remember { mutableStateOf("") }
+    var days by remember { mutableStateOf(setOf("Mon")) }
+    var saveCurrentLocation by remember { mutableStateOf(true) }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    fun resetForm() {
+        editingId = null
+        name = ""
+        km = ""
+        days = setOf("Mon")
+        saveCurrentLocation = true
+    }
+
+    fun savePlace() {
+        val distance = km.toDoubleOrNull() ?: return
+        if (name.isBlank() || distance <= 0.0) return
+        val loc = if (saveCurrentLocation) getLastKnownLocation(context) else null
+        val place = ManualPlace(
+            id = editingId ?: UUID.randomUUID().toString(),
+            name = name.trim(),
+            kilometers = distance,
+            days = if (surprise) emptyList() else days.toList(),
+            latitude = loc?.latitude ?: places.firstOrNull { it.id == editingId }?.latitude,
+            longitude = loc?.longitude ?: places.firstOrNull { it.id == editingId }?.longitude
+        )
+        val updated = places.filterNot { it.id == place.id } + place
+        onSaveState(if (surprise) state.copy(surprisePlaces = updated) else state.copy(places = updated))
+        message = if (place.latitude != null) "Saved with current location." else "Saved without GPS location."
+        resetForm()
+    }
+
+    Dialog(onDismissRequest = onClose) {
+        Card {
+            Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text("Add, edit, delete, or immediately count a saved destination.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+            Spacer(Modifier.height(10.dp))
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(420.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item {
+                    DarkTextField(name, { name = it }, "Name", Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    DarkTextField(km, { km = it }, "One-way km", Modifier.fillMaxWidth(), numeric = true)
+                    if (!surprise) {
+                        Spacer(Modifier.height(8.dp))
+                        DayPicker(days) { days = it }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    CheckRow("Use current GPS for this place", saveCurrentLocation) { saveCurrentLocation = it }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = ::savePlace, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                            Text(if (editingId == null) "Add" else "Save")
+                        }
+                        Button(onClick = ::resetForm, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                            Text("Clear")
+                        }
+                    }
+                    if (message != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(message.orEmpty(), color = Color(0xFFFDE68A), fontSize = 13.sp)
+                    }
+                }
+                items(places, key = { it.id }) { place ->
+                    ManualPlaceCard(
+                        place = place,
+                        onOneWay = { onSaveState(state.copy(kilometersDriven = (state.kilometersDriven + place.kilometers).coerceIn(0.0, state.maxTrackedKm))) },
+                        onRoundTrip = { onSaveState(state.copy(kilometersDriven = (state.kilometersDriven + place.kilometers * 2.0).coerceIn(0.0, state.maxTrackedKm))) },
+                        onEdit = {
+                            editingId = place.id
+                            name = place.name
+                            km = place.kilometers.format1()
+                            days = place.days.toSet().ifEmpty { setOf("Mon") }
+                            saveCurrentLocation = false
+                        },
+                        onRemove = {
+                            val updated = places.filterNot { it.id == place.id }
+                            onSaveState(if (surprise) state.copy(surprisePlaces = updated) else state.copy(places = updated))
+                        }
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = onClose, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
+                Text("Done")
+            }
+        }
+    }
+}
+
+@Composable
+fun ManualSettingsDialog(state: ManualState, onSaveState: (ManualState) -> Unit, onClose: () -> Unit) {
+    val context = LocalContext.current
+    var tracking by remember { mutableStateOf(state.trackingEnabled) }
+    var ssid by remember { mutableStateOf(state.homeWifiSsid) }
+    var alertKm by remember { mutableStateOf(state.alertKm.format0()) }
+    var placeRadius by remember { mutableStateOf(state.placeRadiusMeters.format0()) }
+    var stopRadius by remember { mutableStateOf(state.stopRadiusMeters.format0()) }
+    var stopMinutes by remember { mutableStateOf(state.stopMinutes.format0()) }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    Dialog(onDismissRequest = onClose) {
+        Card {
+            Text("Manual Settings", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text("This controls the real manual tracker, GPS assist, alerts, and home detection.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+            Spacer(Modifier.height(10.dp))
+            Text("Location Assist", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            CheckRow("Enable GPS trip assist", tracking) { tracking = it }
+            Text(locationPermissionLabel(context), color = if (hasLocationPermission(context)) Color(0xFF34D399) else Color(0xFFFDE68A), fontSize = 13.sp)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = {
+                        requestSmartFuelPermissions(context)
+                        message = "Permission request sent. If Android does not show it, open app settings."
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+                ) {
+                    Text("Allow GPS", fontSize = 12.sp)
+                }
+                Button(
+                    onClick = { openAppPermissionSettings(context) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))
+                ) {
+                    Text("Settings", fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            DarkTextField(ssid, { ssid = it }, "Home Wi-Fi SSID", Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            DarkTextField(alertKm, { alertKm = it }, "Alert after km", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(8.dp))
+            DarkTextField(placeRadius, { placeRadius = it }, "Known place radius meters", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(8.dp))
+            DarkTextField(stopRadius, { stopRadius = it }, "Stopped radius meters", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(8.dp))
+            DarkTextField(stopMinutes, { stopMinutes = it }, "Stopped minutes", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = {
+                val loc = getLastKnownLocation(context)
+                if (loc == null) {
+                    message = "Location unavailable. Allow GPS permission and try again."
+                } else {
+                    onSaveState(state.copy(homeLat = loc.latitude, homeLon = loc.longitude))
+                    message = "Home GPS saved."
+                }
+            }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
+                Text("Use Current GPS As Home")
+            }
+            if (message != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(message.orEmpty(), color = Color(0xFFFDE68A), fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onClose, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                    Text("Cancel")
+                }
+                Button(onClick = {
+                    onSaveState(
+                        state.copy(
+                            trackingEnabled = tracking,
+                            homeWifiSsid = ssid.ifBlank { "EnQ" },
+                            alertKm = alertKm.toDoubleOrNull() ?: state.alertKm,
+                            placeRadiusMeters = placeRadius.toDoubleOrNull() ?: state.placeRadiusMeters,
+                            stopRadiusMeters = stopRadius.toDoubleOrNull() ?: state.stopRadiusMeters,
+                            stopMinutes = stopMinutes.toDoubleOrNull() ?: state.stopMinutes
+                        )
+                    )
+                    onClose()
+                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                    Text("Save")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ManualPlaceCard(place: ManualPlace, onOneWay: () -> Unit, onRoundTrip: () -> Unit, onEdit: () -> Unit, onRemove: () -> Unit) {
     Card {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
@@ -807,8 +1047,13 @@ fun ManualPlaceCard(place: ManualPlace, onOneWay: () -> Unit, onRoundTrip: () ->
                 Text("${place.kilometers.format1()} km one way / $days", color = Color(0xFFA1A1AA), fontSize = 13.sp)
                 Text(location, color = Color(0xFF34D399), fontSize = 12.sp)
             }
-            Button(onClick = onRemove, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
-                Text("X")
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Button(onClick = onEdit, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                    Text("Edit", fontSize = 11.sp)
+                }
+                Button(onClick = onRemove, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                    Text("X")
+                }
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -851,7 +1096,53 @@ fun DayPicker(selectedDays: Set<String>, onChange: (Set<String>) -> Unit) {
 }
 
 @Composable
-fun SettingsDrawer(dataSource: String, onSourceChange: (String) -> Unit, onClose: () -> Unit) {
+fun DarkTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    numeric: Boolean = false
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        singleLine = true,
+        modifier = modifier,
+        keyboardOptions = if (numeric) KeyboardOptions(keyboardType = KeyboardType.Decimal) else KeyboardOptions.Default,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = Color.White,
+            unfocusedTextColor = Color.White,
+            focusedLabelColor = Color(0xFF34D399),
+            unfocusedLabelColor = Color(0xFFA1A1AA),
+            cursorColor = Color(0xFF34D399),
+            focusedBorderColor = Color(0xFF34D399),
+            unfocusedBorderColor = Color(0xFF3F3F46)
+        )
+    )
+}
+
+@Composable
+fun CheckRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        Text(label, color = Color.White, fontSize = 13.sp)
+    }
+}
+
+@Composable
+fun SettingsDrawer(
+    dataSource: String,
+    state: ManualState,
+    onSourceChange: (String) -> Unit,
+    onOpenPanel: (String) -> Unit,
+    onClose: () -> Unit
+) {
     Box(Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
@@ -861,6 +1152,7 @@ fun SettingsDrawer(dataSource: String, onSourceChange: (String) -> Unit, onClose
         )
         Column(
             modifier = Modifier
+                .align(Alignment.CenterEnd)
                 .fillMaxHeight()
                 .widthIn(min = 288.dp, max = 340.dp)
                 .background(Color(0xFF111113))
@@ -869,25 +1161,48 @@ fun SettingsDrawer(dataSource: String, onSourceChange: (String) -> Unit, onClose
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Settings", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                    Text("Data mode", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                    Text("Menu", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Text("SmartFuel controls", color = Color(0xFFA1A1AA), fontSize = 13.sp)
                 }
                 Button(onClick = onClose, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
                     Text("X")
                 }
             }
+            Text("Data Mode", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             SourceModeButton("Mock Data", "Demo backend data for UI testing.", "mock", dataSource, onSourceChange)
             SourceModeButton("Firebase", "Reads live backend data from Firestore mode.", "firestore", dataSource, onSourceChange)
             SourceModeButton("Manual", "Local phone-only tracker with places and refills.", "manual", dataSource, onSourceChange)
-            Spacer(Modifier.height(6.dp))
-            Card {
-                Text("Manual defaults", color = Color.White, fontWeight = FontWeight.Bold)
+
+            if (dataSource == "manual") {
+                Spacer(Modifier.height(4.dp))
+                Text("Manual Tools", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                DrawerAction("Manual Entry", "Add kilometers or reset after refill.", "manual", onOpenPanel)
+                DrawerAction("Dedicated Places", "${state.places.size} saved places with day rules.", "dedicated", onOpenPanel)
+                DrawerAction("Surprise Destinations", "${state.surprisePlaces.size} reusable one-off destinations.", "surprise", onOpenPanel)
+                DrawerAction("Manual Settings", "GPS assist, permissions, Wi-Fi, alert and stop rules.", "location", onOpenPanel)
                 Spacer(Modifier.height(6.dp))
-                Text("Tank: 40 L", color = Color(0xFFA1A1AA), fontSize = 13.sp)
-                Text("Tracked range: 200 km", color = Color(0xFFA1A1AA), fontSize = 13.sp)
-                Text("Phone alert: 150 km driven", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                Text(
+                    "Tracking ${if (state.trackingEnabled) "on" else "off"} · ${state.stopMinutes.format0()} min stop · ${state.placeRadiusMeters.format0()} m place radius",
+                    color = Color(0xFF34D399),
+                    fontSize = 13.sp
+                )
             }
         }
+    }
+}
+
+@Composable
+fun DrawerAction(title: String, body: String, panel: String, onOpenPanel: (String) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF18181B), RoundedCornerShape(8.dp))
+            .clickable { onOpenPanel(panel) }
+            .padding(14.dp)
+    ) {
+        Text(title, color = Color.White, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text(body, color = Color(0xFFA1A1AA), fontSize = 13.sp)
     }
 }
 
@@ -1067,6 +1382,11 @@ fun loadManualState(prefs: android.content.SharedPreferences): ManualState {
             alertKm = root.optDouble("alertKm", 150.0),
             kilometersDriven = root.optDouble("kilometersDriven", 0.0),
             alertSent = root.optBoolean("alertSent", false),
+            trackingEnabled = root.optBoolean("trackingEnabled", true),
+            homeWifiSsid = root.optString("homeWifiSsid", "EnQ"),
+            placeRadiusMeters = root.optDouble("placeRadiusMeters", 20.0),
+            stopRadiusMeters = root.optDouble("stopRadiusMeters", 10.0),
+            stopMinutes = root.optDouble("stopMinutes", 30.0),
             homeLat = root.optNullableDouble("homeLat"),
             homeLon = root.optNullableDouble("homeLon"),
             places = root.optJSONArray("places").toPlaces(),
@@ -1075,9 +1395,13 @@ fun loadManualState(prefs: android.content.SharedPreferences): ManualState {
             pendingPlaceName = root.optNullableString("pendingPlaceName"),
             pendingKm = root.optDouble("pendingKm", 0.0),
             pendingMessage = root.optNullableString("pendingMessage"),
+            pendingLat = root.optNullableDouble("pendingLat"),
+            pendingLon = root.optNullableDouble("pendingLon"),
             lastPromptPlaceId = root.optNullableString("lastPromptPlaceId"),
             lastLat = root.optNullableDouble("lastLat"),
             lastLon = root.optNullableDouble("lastLon"),
+            tripStartLat = root.optNullableDouble("tripStartLat"),
+            tripStartLon = root.optNullableDouble("tripStartLon"),
             stationarySinceMs = root.optLong("stationarySinceMs", 0L)
         )
     } catch (_: Exception) {
@@ -1092,6 +1416,11 @@ fun saveManualState(prefs: android.content.SharedPreferences, state: ManualState
         .put("alertKm", state.alertKm)
         .put("kilometersDriven", state.kilometersDriven)
         .put("alertSent", state.alertSent)
+        .put("trackingEnabled", state.trackingEnabled)
+        .put("homeWifiSsid", state.homeWifiSsid)
+        .put("placeRadiusMeters", state.placeRadiusMeters)
+        .put("stopRadiusMeters", state.stopRadiusMeters)
+        .put("stopMinutes", state.stopMinutes)
         .putNullable("homeLat", state.homeLat)
         .putNullable("homeLon", state.homeLon)
         .put("places", JSONArray().apply { state.places.forEach { put(it.toJson()) } })
@@ -1100,9 +1429,13 @@ fun saveManualState(prefs: android.content.SharedPreferences, state: ManualState
         .putNullable("pendingPlaceName", state.pendingPlaceName)
         .put("pendingKm", state.pendingKm)
         .putNullable("pendingMessage", state.pendingMessage)
+        .putNullable("pendingLat", state.pendingLat)
+        .putNullable("pendingLon", state.pendingLon)
         .putNullable("lastPromptPlaceId", state.lastPromptPlaceId)
         .putNullable("lastLat", state.lastLat)
         .putNullable("lastLon", state.lastLon)
+        .putNullable("tripStartLat", state.tripStartLat)
+        .putNullable("tripStartLon", state.tripStartLon)
         .put("stationarySinceMs", state.stationarySinceMs)
     prefs.edit().putString("manual_state", root.toString()).apply()
 }
@@ -1148,21 +1481,42 @@ fun JSONObject.optNullableString(name: String): String? = if (has(name) && !isNu
 fun refreshManualLocationSuggestion(context: Context, state: ManualState): ManualState {
     val location = getLastKnownLocation(context) ?: return state
     val now = System.currentTimeMillis()
-    val stationarySince = if (state.lastLat != null && state.lastLon != null && distanceMeters(state.lastLat, state.lastLon, location.latitude, location.longitude) < 80.0) {
+    val stationarySince = if (state.lastLat != null && state.lastLon != null && distanceMeters(state.lastLat, state.lastLon, location.latitude, location.longitude) <= state.stopRadiusMeters) {
         state.stationarySinceMs.takeIf { it > 0L } ?: now
     } else {
         now
     }
-    var next = state.copy(lastLat = location.latitude, lastLon = location.longitude, stationarySinceMs = stationarySince)
+    val movedFromLast = if (state.lastLat != null && state.lastLon != null) {
+        distanceMeters(state.lastLat, state.lastLon, location.latitude, location.longitude)
+    } else {
+        0.0
+    }
+    val tripStartLat = when {
+        state.tripStartLat == null -> state.lastLat ?: location.latitude
+        movedFromLast > 500.0 -> state.tripStartLat
+        else -> state.tripStartLat
+    }
+    val tripStartLon = when {
+        state.tripStartLon == null -> state.lastLon ?: location.longitude
+        movedFromLast > 500.0 -> state.tripStartLon
+        else -> state.tripStartLon
+    }
+    var next = state.copy(
+        lastLat = location.latitude,
+        lastLon = location.longitude,
+        tripStartLat = tripStartLat,
+        tripStartLon = tripStartLon,
+        stationarySinceMs = stationarySince
+    )
 
     if (state.homeLat != null && state.homeLon != null && distanceMeters(state.homeLat, state.homeLon, location.latitude, location.longitude) < 130.0) {
-        return next.copy(pendingMessage = null, pendingPlaceId = null)
+        return next.copy(pendingMessage = null, pendingPlaceId = null, tripStartLat = location.latitude, tripStartLon = location.longitude)
     }
 
     val knownPlace = (state.places + state.surprisePlaces).firstOrNull { place ->
         place.latitude != null &&
             place.longitude != null &&
-            distanceMeters(place.latitude, place.longitude, location.latitude, location.longitude) < 180.0 &&
+            distanceMeters(place.latitude, place.longitude, location.latitude, location.longitude) <= state.placeRadiusMeters &&
             state.lastPromptPlaceId != place.id
     }
     if (knownPlace != null) {
@@ -1170,18 +1524,81 @@ fun refreshManualLocationSuggestion(context: Context, state: ManualState): Manua
             pendingPlaceId = knownPlace.id,
             pendingPlaceName = knownPlace.name,
             pendingKm = knownPlace.kilometers,
-            pendingMessage = "You look parked near ${knownPlace.name}. Should SmartFuel count that trip?",
+            pendingMessage = "Are you at ${knownPlace.name}? Confirm to count ${knownPlace.kilometers.format1()} km.",
+            pendingLat = location.latitude,
+            pendingLon = location.longitude,
             lastPromptPlaceId = knownPlace.id
         )
-    } else if (now - stationarySince >= 20 * 60 * 1000L && state.pendingMessage == null) {
+    } else if (now - stationarySince >= (state.stopMinutes * 60_000.0).toLong() && state.pendingMessage == null && tripStartLat != null && tripStartLon != null) {
+        val guessedKm = (distanceMeters(tripStartLat, tripStartLon, location.latitude, location.longitude) / 1000.0 * 1.2).coerceAtLeast(0.1)
         next = next.copy(
             pendingPlaceId = "new-stop",
             pendingPlaceName = "New stop",
-            pendingKm = 0.0,
-            pendingMessage = "You seem stopped somewhere new. Add this place below with its distance, then use One way or Round."
+            pendingKm = guessedKm,
+            pendingMessage = "You seem stopped somewhere new. Is this a trip? SmartFuel guessed ${guessedKm.format1()} km; edit it before confirming.",
+            pendingLat = location.latitude,
+            pendingLon = location.longitude
         )
     }
     return next
+}
+
+fun updateManualTrackingService(context: Context, dataSource: String, state: ManualState) {
+    val intent = Intent(context, ManualLocationService::class.java)
+    if (dataSource == "manual" && state.trackingEnabled && hasLocationPermission(context)) {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }.onFailure {
+            context.stopService(intent)
+        }
+    } else {
+        context.stopService(intent)
+    }
+}
+
+fun hasLocationPermission(context: Context): Boolean =
+    context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+        context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+fun hasBackgroundLocationPermission(context: Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+        context.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+fun locationPermissionLabel(context: Context): String {
+    val foreground = hasLocationPermission(context)
+    val background = hasBackgroundLocationPermission(context)
+    return when {
+        foreground && background -> "GPS permission: allowed, including background."
+        foreground -> "GPS permission: allowed while app/service is active. Use Settings for all-the-time access."
+        else -> "GPS permission: not allowed yet."
+    }
+}
+
+fun requestSmartFuelPermissions(context: Context) {
+    val activity = context as? Activity ?: return
+    val permissions = mutableListOf<String>()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    if (!hasLocationPermission(context)) {
+        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+    }
+    if (permissions.isNotEmpty()) {
+        activity.requestPermissions(permissions.toTypedArray(), 71)
+    }
+}
+
+fun openAppPermissionSettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null)
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
 }
 
 fun getLastKnownLocation(context: Context): Location? {
@@ -1258,5 +1675,5 @@ fun SmartFuelTheme(content: @Composable () -> Unit) {
     MaterialTheme(content = content)
 }
 
-private fun Double.format0(): String = String.format("%.0f", this)
-private fun Double.format1(): String = String.format("%.1f", this)
+fun Double.format0(): String = String.format("%.0f", this)
+fun Double.format1(): String = String.format("%.1f", this)
