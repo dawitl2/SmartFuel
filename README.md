@@ -294,3 +294,5 @@ Planned improvements:
 SmartFuel solves a real vehicle problem with a full-stack IoT architecture. It demonstrates practical software engineering across hardware integration, backend API design, database modeling, frontend dashboards, native mobile development, offline handling, and production planning.
 
 The result is not just a UI mockup. It is a working multi-client system where the web app, Android app, backend, database schema, and Raspberry Pi service all share one consistent telemetry and fuel estimation model.
+#   P o c k e t _ S a m s u n g _ R e m o t e  
+ 
