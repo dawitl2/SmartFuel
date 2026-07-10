@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Geocoder
 import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
@@ -77,6 +78,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
@@ -156,6 +158,7 @@ data class ManualState(
     val placeRadiusMeters: Double = 20.0,
     val stopRadiusMeters: Double = 10.0,
     val stopMinutes: Double = 30.0,
+    val homeAddress: String = "",
     val homeLat: Double? = null,
     val homeLon: Double? = null,
     val places: List<ManualPlace> = emptyList(),
@@ -655,8 +658,8 @@ fun ManualModeView(state: ManualState, onSaveState: (ManualState) -> Unit, onOpe
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("SmartFuel", color = Color(0xFF34D399), fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    Text("Manual Fuel", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                    Text(if (state.trackingEnabled) "Auto trip assist is running" else "Auto trip assist is off", color = Color(0xFFA1A1AA))
+                    Text("GPS Manual", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                    Text(if (state.trackingEnabled) "GPS assist is on" else "Manual-only tracking", color = Color(0xFFA1A1AA))
                 }
                 Button(onClick = onOpenSettings, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF18181B))) {
                     Text("☰", fontSize = 20.sp)
@@ -724,7 +727,7 @@ fun ManualModeView(state: ManualState, onSaveState: (ManualState) -> Unit, onOpe
             Card {
                 Text("Trip Assist", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Text("Known places: ${state.places.size}. Surprise places: ${state.surprisePlaces.size}. Home Wi-Fi: ${state.homeWifiSsid}.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+                Text("Known places: ${state.places.size}. Surprise places: ${state.surprisePlaces.size}. Home: ${if (state.homeAddress.isBlank()) "not set" else state.homeAddress}.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
                 Spacer(Modifier.height(6.dp))
                 Text(
                     if (state.trackingEnabled && !hasLocationPermission(context)) "GPS permission is missing. Open Manual Settings to allow it." else "Open the menu to edit places, alert distance, Wi-Fi and location rules.",
@@ -817,28 +820,48 @@ fun PendingTripDialog(state: ManualState, onSaveState: (ManualState) -> Unit) {
 
 @Composable
 fun ManualEntryDialog(state: ManualState, onSaveState: (ManualState) -> Unit, onClose: () -> Unit) {
-    var km by remember { mutableStateOf("10") }
+    var tripKm by remember { mutableStateOf("7") }
+    var drivenKm by remember { mutableStateOf(state.kilometersDriven.format1()) }
+    var remainingKm by remember { mutableStateOf(state.remainingKm.format1()) }
     Dialog(onDismissRequest = onClose) {
         Card {
             Text("Manual Entry", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            Text("Add a driven distance or reset the local counter after refilling.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
+            Text("Use this when GPS assist is off, wrong, or you simply know the distance yourself.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
             Spacer(Modifier.height(12.dp))
-            DarkTextField(km, { km = it }, "Kilometers", Modifier.fillMaxWidth(), numeric = true)
+            DarkTextField(tripKm, { tripKm = it }, "Add trip distance km", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = {
+                onSaveState(state.copy(kilometersDriven = (state.kilometersDriven + (tripKm.toDoubleOrNull() ?: 0.0)).coerceIn(0.0, state.maxTrackedKm)))
+                onClose()
+            }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                Text("Add Trip")
+            }
             Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = {
-                    onSaveState(state.copy(kilometersDriven = (state.kilometersDriven + (km.toDoubleOrNull() ?: 0.0)).coerceIn(0.0, state.maxTrackedKm)))
-                    onClose()
-                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
-                    Text("Add")
-                }
-                Button(onClick = {
-                    onSaveState(state.copy(kilometersDriven = 0.0, alertSent = false, pendingMessage = null))
-                    onClose()
-                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
-                    Text("Refill")
-                }
+            DarkTextField(drivenKm, { drivenKm = it }, "Set total driven km", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = {
+                onSaveState(state.copy(kilometersDriven = (drivenKm.toDoubleOrNull() ?: state.kilometersDriven).coerceIn(0.0, state.maxTrackedKm)))
+                onClose()
+            }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
+                Text("Set Driven")
+            }
+            Spacer(Modifier.height(12.dp))
+            DarkTextField(remainingKm, { remainingKm = it }, "Set remaining range km", Modifier.fillMaxWidth(), numeric = true)
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = {
+                val remaining = (remainingKm.toDoubleOrNull() ?: state.remainingKm).coerceIn(0.0, state.maxTrackedKm)
+                onSaveState(state.copy(kilometersDriven = (state.maxTrackedKm - remaining).coerceIn(0.0, state.maxTrackedKm)))
+                onClose()
+            }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                Text("Set Remaining")
+            }
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = {
+                onSaveState(state.copy(kilometersDriven = 0.0, alertSent = false, pendingMessage = null))
+                onClose()
+            }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
+                Text("Full Refill / Reset")
             }
         }
     }
@@ -949,6 +972,7 @@ fun ManualSettingsDialog(state: ManualState, onSaveState: (ManualState) -> Unit,
     val context = LocalContext.current
     var tracking by remember { mutableStateOf(state.trackingEnabled) }
     var ssid by remember { mutableStateOf(state.homeWifiSsid) }
+    var homeAddress by remember { mutableStateOf(state.homeAddress) }
     var alertKm by remember { mutableStateOf(state.alertKm.format0()) }
     var placeRadius by remember { mutableStateOf(state.placeRadiusMeters.format0()) }
     var stopRadius by remember { mutableStateOf(state.stopRadiusMeters.format0()) }
@@ -957,79 +981,114 @@ fun ManualSettingsDialog(state: ManualState, onSaveState: (ManualState) -> Unit,
 
     Dialog(onDismissRequest = onClose) {
         Card {
-            Text("Manual Settings", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text("This controls the real manual tracker, GPS assist, alerts, and home detection.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
-            Spacer(Modifier.height(10.dp))
-            Text("Location Assist", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            CheckRow("Enable GPS trip assist", tracking) { tracking = it }
-            Text(locationPermissionLabel(context), color = if (hasLocationPermission(context)) Color(0xFF34D399) else Color(0xFFFDE68A), fontSize = 13.sp)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
-                    onClick = {
-                        requestSmartFuelPermissions(context)
-                        message = "Permission request sent. If Android does not show it, open app settings."
-                    },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
-                ) {
-                    Text("Allow GPS", fontSize = 12.sp)
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(560.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item {
+                    Text("GPS Manual Settings", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Manual tracking works without GPS. GPS Assist is optional and can be turned off here.", color = Color(0xFFA1A1AA), fontSize = 13.sp)
                 }
-                Button(
-                    onClick = { openAppPermissionSettings(context) },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))
-                ) {
-                    Text("Settings", fontSize = 12.sp)
+                item {
+                    Text("GPS Assist", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    CheckRow("Use GPS Assist inside manual mode", tracking) { tracking = it }
+                    Text(locationPermissionLabel(context), color = if (hasLocationPermission(context)) Color(0xFF34D399) else Color(0xFFFDE68A), fontSize = 13.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = {
+                                requestSmartFuelPermissions(context)
+                                message = "Permission request sent. If Android does not show it, open app settings."
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+                        ) {
+                            Text("Allow GPS", fontSize = 12.sp)
+                        }
+                        Button(
+                            onClick = { openAppPermissionSettings(context) },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))
+                        ) {
+                            Text("Android Settings", fontSize = 12.sp)
+                        }
+                    }
                 }
-            }
-            Spacer(Modifier.height(12.dp))
-            DarkTextField(ssid, { ssid = it }, "Home Wi-Fi SSID", Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            DarkTextField(alertKm, { alertKm = it }, "Alert after km", Modifier.fillMaxWidth(), numeric = true)
-            Spacer(Modifier.height(8.dp))
-            DarkTextField(placeRadius, { placeRadius = it }, "Known place radius meters", Modifier.fillMaxWidth(), numeric = true)
-            Spacer(Modifier.height(8.dp))
-            DarkTextField(stopRadius, { stopRadius = it }, "Stopped radius meters", Modifier.fillMaxWidth(), numeric = true)
-            Spacer(Modifier.height(8.dp))
-            DarkTextField(stopMinutes, { stopMinutes = it }, "Stopped minutes", Modifier.fillMaxWidth(), numeric = true)
-            Spacer(Modifier.height(10.dp))
-            Button(onClick = {
-                val loc = getLastKnownLocation(context)
-                if (loc == null) {
-                    message = "Location unavailable. Allow GPS permission and try again."
-                } else {
-                    onSaveState(state.copy(homeLat = loc.latitude, homeLon = loc.longitude))
-                    message = "Home GPS saved."
+                item {
+                    Text("Home Setup", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    DarkTextField(homeAddress, { homeAddress = it }, "Home address", Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = {
+                            val resolved = resolveAddressToLocation(context, homeAddress)
+                            if (resolved == null) {
+                                message = "Could not resolve that address. Try a fuller address or use current GPS at home."
+                            } else {
+                                onSaveState(state.copy(homeAddress = homeAddress, homeLat = resolved.latitude, homeLon = resolved.longitude))
+                                message = "Home address resolved and saved."
+                            }
+                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                            Text("Resolve", fontSize = 12.sp)
+                        }
+                        Button(onClick = {
+                            val loc = getLastKnownLocation(context)
+                            if (loc == null) {
+                                message = "Location unavailable. Allow GPS permission and try again."
+                            } else {
+                                onSaveState(state.copy(homeAddress = homeAddress, homeLat = loc.latitude, homeLon = loc.longitude))
+                                message = "Current GPS saved as home."
+                            }
+                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
+                            Text("Use GPS", fontSize = 12.sp)
+                        }
+                    }
+                    val homeStatus = if (state.homeLat != null && state.homeLon != null) "Home GPS saved" else "Home GPS not set"
+                    Spacer(Modifier.height(6.dp))
+                    Text(homeStatus, color = if (state.homeLat != null) Color(0xFF34D399) else Color(0xFFFDE68A), fontSize = 13.sp)
                 }
-            }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))) {
-                Text("Use Current GPS As Home")
-            }
-            if (message != null) {
-                Spacer(Modifier.height(8.dp))
-                Text(message.orEmpty(), color = Color(0xFFFDE68A), fontSize = 13.sp)
-            }
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onClose, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
-                    Text("Cancel")
+                item {
+                    Text("Detection Rules", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    DarkTextField(ssid, { ssid = it }, "Home Wi-Fi SSID", Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    DarkTextField(alertKm, { alertKm = it }, "Alert after km", Modifier.fillMaxWidth(), numeric = true)
+                    Spacer(Modifier.height(8.dp))
+                    DarkTextField(placeRadius, { placeRadius = it }, "Known place radius meters", Modifier.fillMaxWidth(), numeric = true)
+                    Spacer(Modifier.height(8.dp))
+                    DarkTextField(stopRadius, { stopRadius = it }, "Stopped radius meters", Modifier.fillMaxWidth(), numeric = true)
+                    Spacer(Modifier.height(8.dp))
+                    DarkTextField(stopMinutes, { stopMinutes = it }, "Stopped minutes", Modifier.fillMaxWidth(), numeric = true)
                 }
-                Button(onClick = {
-                    onSaveState(
-                        state.copy(
-                            trackingEnabled = tracking,
-                            homeWifiSsid = ssid.ifBlank { "EnQ" },
-                            alertKm = alertKm.toDoubleOrNull() ?: state.alertKm,
-                            placeRadiusMeters = placeRadius.toDoubleOrNull() ?: state.placeRadiusMeters,
-                            stopRadiusMeters = stopRadius.toDoubleOrNull() ?: state.stopRadiusMeters,
-                            stopMinutes = stopMinutes.toDoubleOrNull() ?: state.stopMinutes
-                        )
-                    )
-                    onClose()
-                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
-                    Text("Save")
+                if (message != null) {
+                    item { Text(message.orEmpty(), color = Color(0xFFFDE68A), fontSize = 13.sp) }
+                }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = onClose, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF27272A))) {
+                            Text("Cancel")
+                        }
+                        Button(onClick = {
+                            onSaveState(
+                                state.copy(
+                                    trackingEnabled = tracking,
+                                    homeWifiSsid = ssid.ifBlank { "EnQ" },
+                                    homeAddress = homeAddress,
+                                    alertKm = alertKm.toDoubleOrNull() ?: state.alertKm,
+                                    placeRadiusMeters = placeRadius.toDoubleOrNull() ?: state.placeRadiusMeters,
+                                    stopRadiusMeters = stopRadius.toDoubleOrNull() ?: state.stopRadiusMeters,
+                                    stopMinutes = stopMinutes.toDoubleOrNull() ?: state.stopMinutes
+                                )
+                            )
+                            onClose()
+                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))) {
+                            Text("Save")
+                        }
+                    }
                 }
             }
         }
@@ -1171,12 +1230,12 @@ fun SettingsDrawer(
             Text("Data Mode", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             SourceModeButton("Mock Data", "Demo backend data for UI testing.", "mock", dataSource, onSourceChange)
             SourceModeButton("Firebase", "Reads live backend data from Firestore mode.", "firestore", dataSource, onSourceChange)
-            SourceModeButton("Manual", "Local phone-only tracker with places and refills.", "manual", dataSource, onSourceChange)
+            SourceModeButton("GPS Manual", "Local fuel tracker with optional GPS assist.", "manual", dataSource, onSourceChange)
 
             if (dataSource == "manual") {
                 Spacer(Modifier.height(4.dp))
                 Text("Manual Tools", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                DrawerAction("Manual Entry", "Add kilometers or reset after refill.", "manual", onOpenPanel)
+                DrawerAction("Manual Entry", "Add trips, set driven distance, or set remaining range.", "manual", onOpenPanel)
                 DrawerAction("Dedicated Places", "${state.places.size} saved places with day rules.", "dedicated", onOpenPanel)
                 DrawerAction("Surprise Destinations", "${state.surprisePlaces.size} reusable one-off destinations.", "surprise", onOpenPanel)
                 DrawerAction("Manual Settings", "GPS assist, permissions, Wi-Fi, alert and stop rules.", "location", onOpenPanel)
@@ -1387,6 +1446,7 @@ fun loadManualState(prefs: android.content.SharedPreferences): ManualState {
             placeRadiusMeters = root.optDouble("placeRadiusMeters", 20.0),
             stopRadiusMeters = root.optDouble("stopRadiusMeters", 10.0),
             stopMinutes = root.optDouble("stopMinutes", 30.0),
+            homeAddress = root.optString("homeAddress", ""),
             homeLat = root.optNullableDouble("homeLat"),
             homeLon = root.optNullableDouble("homeLon"),
             places = root.optJSONArray("places").toPlaces(),
@@ -1421,6 +1481,7 @@ fun saveManualState(prefs: android.content.SharedPreferences, state: ManualState
         .put("placeRadiusMeters", state.placeRadiusMeters)
         .put("stopRadiusMeters", state.stopRadiusMeters)
         .put("stopMinutes", state.stopMinutes)
+        .put("homeAddress", state.homeAddress)
         .putNullable("homeLat", state.homeLat)
         .putNullable("homeLon", state.homeLon)
         .put("places", JSONArray().apply { state.places.forEach { put(it.toJson()) } })
@@ -1621,6 +1682,20 @@ fun distanceMeters(fromLat: Double, fromLon: Double, toLat: Double, toLon: Doubl
     val result = FloatArray(1)
     Location.distanceBetween(fromLat, fromLon, toLat, toLon, result)
     return result[0].toDouble()
+}
+
+fun resolveAddressToLocation(context: Context, address: String): Location? {
+    if (address.isBlank()) return null
+    return try {
+        @Suppress("DEPRECATION")
+        val result = Geocoder(context, Locale.getDefault()).getFromLocationName(address, 1)?.firstOrNull() ?: return null
+        Location("home-address").apply {
+            latitude = result.latitude
+            longitude = result.longitude
+        }
+    } catch (_: Exception) {
+        null
+    }
 }
 
 fun showLowFuelNotification(context: Context, percentage: Double) {
